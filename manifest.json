@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "SpachBob",
+  "version": "1.0",
+  "description": "This extension is made for moodle to answer the quizes just by pressing 'special keys' keys on your keyboard.",
+  
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
