@@ -1,4 +1,4 @@
-const apiKey = "------ Add your google ai studio api key here -----";
+const apiKey = ""
 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 const apiUrl_ANSWER = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
 
@@ -19,7 +19,7 @@ function handleMultipleChoiceQuestion(thinkingBudget) {
   }
 
   const answerOptions = [];
-  const optionElements = questionBlock.querySelectorAll('fieldset.ablock .answer .d-flex');
+  const optionElements = questionBlock.querySelectorAll('.ablock .answer .d-flex');
 
   if (optionElements.length === 0) {
     console.log("Could not find any answer options with '.d-flex'.");
@@ -62,7 +62,7 @@ function handleTrueFalseQuestion(thinkingBudget) {
 
   const answerOptions = [];
   // Select .r0 and .r1 divs
-  const optionElements = questionBlock.querySelectorAll('fieldset.ablock .answer div[class^="r"]');
+  const optionElements = questionBlock.querySelectorAll('.ablock .answer div[class^="r"]');
 
   if (optionElements.length === 0) {
     console.log("Could not find any answer options with 'div[class^=\"r\"]'.");
@@ -71,7 +71,8 @@ function handleTrueFalseQuestion(thinkingBudget) {
 
   optionElements.forEach(optionEl => {
     const radioInput = optionEl.querySelector('input[type="radio"]');
-    const optionTextElement = optionEl.querySelector('label.ms-1');
+    let optionTextElement = optionEl.querySelector('.ms-1');
+    if (!optionTextElement) optionTextElement = optionEl.querySelector('.flex-fill');
 
     if (radioInput && optionTextElement) {
       const text = optionTextElement.textContent.trim().replace(/\s+/g, ' ');
@@ -246,8 +247,8 @@ Please provide only the correct option ANAS_1, ANAS_2, ANAS_3 etc., without any 
   };
 
   try {
-    console.log(`running... ${apiUrl}`)
-    const response = await fetchWithBackoff(apiUrl, {
+    console.log(`running... ${apiUrl_ANSWER}`)
+    const response = await fetchWithBackoff(apiUrl_ANSWER, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -298,19 +299,6 @@ async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) 
     }
   }
 }
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'k') {
-    console.log("Key 'k' pressed. Handling as multiple choice...");
-    handleMultipleChoiceQuestion();
-  } else if (event.key === 't') {
-    console.log("Key 't' pressed. Handling as true/false...");
-    handleTrueFalseQuestion(0);
-  } else if (event.key === 'a') {
-    console.log("Key 'a' pressed. Handling as short answer...");
-    handleShortAnswerQuestion();
-  }
-});
 
 function handleShortAnswerQuestion() {
   const questionBlock = document.querySelector('.formulation.clearfix');
@@ -404,3 +392,16 @@ Provide a concise short answer (one sentence or less). Return only the answer te
     return null;
   }
 }
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'k') {
+    console.log("Key 'k' pressed. Handling as multiple choice...");
+    handleMultipleChoiceQuestion();
+  } else if (event.key === 't') {
+    console.log("Key 't' pressed. Handling as true/false...");
+    handleTrueFalseQuestion(0);
+  } else if (event.key === 'a') {
+    console.log("Key 'a' pressed. Handling as short answer...");
+    handleShortAnswerQuestion();
+  }
+});
