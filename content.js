@@ -1,4 +1,4 @@
-const apiKey = "AIzaSyA_AqeOgucX7zo_2UJEJA8YwQKkNY3Be9U"
+const apiKey = ""
 const apiUrl_ANSWER = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
 //  `apiUrl` not in use 
 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
@@ -510,8 +510,8 @@ document.addEventListener('keydown', (event) => {
   } else if (event.key === 'a') {
     console.log("Key 'a' pressed. Handling as short answer...");
     handleShortAnswerQuestion();
-  } else if (event.key === 'T') {
-    console.log("Key 'T' pressed. Testing model connection...");
+  } else if (event.key === 't') {
+    console.log("Key 't' pressed. Testing model connection...");
     testModelConnection();
   } else if (event.key === 'h' || event.key === 'H') {
     console.log("Key 'h/H' pressed. Showing help...");
