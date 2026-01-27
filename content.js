@@ -1,6 +1,7 @@
-const apiKey = ""
-const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+const apiKey = "AIzaSyA_AqeOgucX7zo_2UJEJA8YwQKkNY3Be9U"
 const apiUrl_ANSWER = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+//  `apiUrl` not in use 
+const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 
 
 function handleMultipleChoiceQuestion(thinkingBudget) {
@@ -393,6 +394,112 @@ Provide a concise short answer (one sentence or less). Return only the answer te
   }
 }
 
+// Global help function - callable from browser console
+window.spachBobHelp = function() {
+  const helpMessage = `
+╔════════════════════════════════════════════════════════════╗
+║           SpachBob Extension - Keyboard Shortcuts          ║
+╠════════════════════════════════════════════════════════════╣
+║  Key  │  Action                                            ║
+╠═══════╪════════════════════════════════════════════════════╣
+║   k   │  Handle Multiple Choice Question                   ║
+║       │  - Sends question and options to AI model          ║
+║       │  - Automatically selects the correct answer        ║
+╠═══════╪════════════════════════════════════════════════════╣
+║   t   │  Handle True/False Question                        ║
+║       │  - Processes True/False type questions             ║
+║       │  - Automatically selects the correct answer        ║
+╠═══════╪════════════════════════════════════════════════════╣
+║   a   │  Handle Short Answer Question                      ║
+║       │  - Sends question to AI for text response          ║
+║       │  - Fills in the answer input field                 ║
+╠═══════╪════════════════════════════════════════════════════╣
+║   T   │  Test Model Connection (Shift + t)                 ║
+║       │  - Tests API connectivity to Gemini model          ║
+║       │  - Shows response time and status                  ║
+║       │  - Displays success/failure alert                  ║
+╚═══════╧════════════════════════════════════════════════════╝
+
+📌 Usage:
+   - Simply press the corresponding key on any quiz page
+   - Check browser console for detailed logs
+   - Call spachBobHelp() in console to see this help again
+
+🔧 Functions available in console:
+   - spachBobHelp()          : Show this help message
+   - testModelConnection()   : Test API connection manually
+
+⚙️  Current API: Gemini 2.5 Pro
+📡 Model URL: ${apiUrl_ANSWER}
+  `;
+  
+  console.log(helpMessage);
+  return "Help displayed in console ✓";
+};
+
+// Make testModelConnection globally accessible
+window.testModelConnection = testModelConnection;
+
+async function testModelConnection() {
+  console.log("=== Testing Model Connection ===");
+  const testPrompt = "Say 'ANAS_OK_ANAS' if you receive this message.";
+  
+  const payload = {
+    contents: [{
+      parts: [{
+        text: testPrompt
+      }]
+    }]
+  };
+
+  try {
+    console.log(`Testing connection to: ${apiUrl_ANSWER}`);
+    const startTime = Date.now();
+    
+    const response = await fetch(apiUrl_ANSWER, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const endTime = Date.now();
+    const responseTime = endTime - startTime;
+
+    console.log(`Response received in ${responseTime}ms`);
+    console.log(`Status: ${response.status} ${response.statusText}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ TEST FAILED - API request failed with status ${response.status}`);
+      console.error(`Error details: ${errorText}`);
+      alert(`❌ Model Test FAILED\nStatus: ${response.status}\nResponse time: ${responseTime}ms\nCheck console for details.`);
+      return false;
+    }
+
+    const result = await response.json();
+    console.log("API Response:", JSON.stringify(result, null, 2));
+
+    const candidate = result.candidates?.[0];
+    if (candidate && candidate.content?.parts?.[0]?.text) {
+      const aiText = candidate.content.parts[0].text.trim();
+      console.log(`✅ TEST PASSED - Model responded: "${aiText}"`);
+      console.log(`Response time: ${responseTime}ms`);
+      alert(`✅ Model Test SUCCESSFUL\nResponse: "${aiText}"\nResponse time: ${responseTime}ms`);
+      return true;
+    } else {
+      console.error("❌ TEST FAILED - No valid content in response");
+      alert(`❌ Model Test FAILED\nNo valid content in response\nResponse time: ${responseTime}ms`);
+      return false;
+    }
+  } catch (error) {
+    console.error("❌ TEST FAILED - Error:", error);
+    alert(`❌ Model Test FAILED\nError: ${error.message}\nCheck console for details.`);
+    return false;
+  }
+}
+
 document.addEventListener('keydown', (event) => {
   if (event.key === 'k') {
     console.log("Key 'k' pressed. Handling as multiple choice...");
@@ -403,5 +510,15 @@ document.addEventListener('keydown', (event) => {
   } else if (event.key === 'a') {
     console.log("Key 'a' pressed. Handling as short answer...");
     handleShortAnswerQuestion();
+  } else if (event.key === 'T') {
+    console.log("Key 'T' pressed. Testing model connection...");
+    testModelConnection();
+  } else if (event.key === 'h' || event.key === 'H') {
+    console.log("Key 'h/H' pressed. Showing help...");
+    spachBobHelp();
   }
 });
+
+// Log welcome message on load
+// console.log("%c🎓 SpachBob Extension Loaded!", "color: #4CAF50; font-size: 16px; font-weight: bold;");
+// console.log("%cType spachBobHelp() for available keyboard shortcuts", "color: #2196F3; font-size: 12px;");
