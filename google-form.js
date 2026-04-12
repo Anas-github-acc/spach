@@ -1,6 +1,7 @@
-const googleFormApiKey = "AIzaSyCEz1akatDwCx5KDPTu0-E3CE1RacBlx6Q";
 const googleFormApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${googleFormApiKey}`;
+const GOOGLE_FORM_PROGRESS_STORAGE_KEY = "spachbob_google_form_progress_v1";
 const googleFormRunState = {
+  formKey: "",
   signature: "",
   nextHalf: 0
 };
@@ -85,11 +86,68 @@ function buildQuestionsSignature(questions) {
   return questions.map((q) => `${q.index}|${q.type}|${q.question}`).join("||");
 }
 
+function getCurrentFormKey() {
+  return `${location.origin}${location.pathname}`;
+}
+
+function readAllFormProgress() {
+  try {
+    const raw = localStorage.getItem(GOOGLE_FORM_PROGRESS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch (_err) {
+    return {};
+  }
+}
+
+function writeAllFormProgress(progress) {
+  try {
+    localStorage.setItem(GOOGLE_FORM_PROGRESS_STORAGE_KEY, JSON.stringify(progress));
+  } catch (_err) {
+    // Ignore storage failures.
+  }
+}
+
+function readFormProgress(formKey) {
+  const all = readAllFormProgress();
+  const entry = all[formKey];
+  if (!entry || typeof entry !== "object") return null;
+  return {
+    signature: typeof entry.signature === "string" ? entry.signature : "",
+    nextHalf: Number.isInteger(entry.nextHalf) ? Math.max(0, Math.min(2, entry.nextHalf)) : 0
+  };
+}
+
+function writeFormProgress(formKey, state) {
+  const all = readAllFormProgress();
+  all[formKey] = {
+    signature: state.signature || "",
+    nextHalf: Number.isInteger(state.nextHalf) ? Math.max(0, Math.min(2, state.nextHalf)) : 0,
+    updatedAt: Date.now()
+  };
+  writeAllFormProgress(all);
+}
+
+function setRunState(formKey, signature, nextHalf) {
+  googleFormRunState.formKey = formKey;
+  googleFormRunState.signature = signature;
+  googleFormRunState.nextHalf = Math.max(0, Math.min(2, Number(nextHalf) || 0));
+  writeFormProgress(formKey, googleFormRunState);
+}
+
 function pickQuestionsHalf(questions) {
+  const formKey = getCurrentFormKey();
   const signature = buildQuestionsSignature(questions);
-  if (googleFormRunState.signature !== signature) {
-    googleFormRunState.signature = signature;
-    googleFormRunState.nextHalf = 0;
+
+  if (googleFormRunState.formKey !== formKey || googleFormRunState.signature !== signature) {
+    const saved = readFormProgress(formKey);
+    if (saved && saved.signature === signature) {
+      setRunState(formKey, signature, saved.nextHalf);
+    } else {
+      setRunState(formKey, signature, 0);
+    }
   }
 
   const mid = Math.ceil(questions.length / 2);
@@ -482,13 +540,17 @@ async function handleGoogleFormWithAI() {
 
   const { halfIndex, selected } = pickQuestionsHalf(questions);
   if (halfIndex === -1) {
-    console.log("[SpachBob] Both halves already processed. Reload page to run again.");
+    console.log("[SpachBob] Both halves already processed for this form.");
     return;
   }
 
   if (!selected.length) {
     console.log("[SpachBob] No questions found for this half.");
-    googleFormRunState.nextHalf = Math.min(googleFormRunState.nextHalf + 1, 2);
+    setRunState(
+      googleFormRunState.formKey || getCurrentFormKey(),
+      googleFormRunState.signature || buildQuestionsSignature(questions),
+      Math.min(googleFormRunState.nextHalf + 1, 2)
+    );
     return;
   }
 
@@ -504,7 +566,11 @@ async function handleGoogleFormWithAI() {
     const answers = await getGoogleFormAnswersFromAI(selected);
     console.log("[SpachBob] AI answers:", answers);
     fillGoogleFormAnswers(selected, answers);
-    googleFormRunState.nextHalf = Math.min(googleFormRunState.nextHalf + 1, 2);
+    setRunState(
+      googleFormRunState.formKey || getCurrentFormKey(),
+      googleFormRunState.signature || buildQuestionsSignature(questions),
+      Math.min(googleFormRunState.nextHalf + 1, 2)
+    );
     console.log("[SpachBob] Form fill completed.");
   } catch (error) {
     console.error("[SpachBob] Failed to solve Google Form:", error);

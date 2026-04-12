@@ -14,7 +14,7 @@
         "https://docs.google.com/forms/*",
         "https://betamoodle.iiitvadodara.ac.in/*"
       ],
-      "js": ["content.js", "google-form.js"]
+      "js": ["config.js", "content.js", "google-form.js"]
     }
   ]
 }
