@@ -1,5 +1,9 @@
-const googleFormApiKey = "";
+const googleFormApiKey = "AIzaSyCEz1akatDwCx5KDPTu0-E3CE1RacBlx6Q";
 const googleFormApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${googleFormApiKey}`;
+const googleFormRunState = {
+  signature: "",
+  nextHalf: 0
+};
 
 function isEditableElement(el) {
   if (!el) return false;
@@ -75,6 +79,28 @@ function extractGoogleFormQuestions() {
   });
 
   return questions;
+}
+
+function buildQuestionsSignature(questions) {
+  return questions.map((q) => `${q.index}|${q.type}|${q.question}`).join("||");
+}
+
+function pickQuestionsHalf(questions) {
+  const signature = buildQuestionsSignature(questions);
+  if (googleFormRunState.signature !== signature) {
+    googleFormRunState.signature = signature;
+    googleFormRunState.nextHalf = 0;
+  }
+
+  const mid = Math.ceil(questions.length / 2);
+  const halves = [questions.slice(0, mid), questions.slice(mid)];
+  const halfIndex = googleFormRunState.nextHalf;
+
+  if (halfIndex > 1) {
+    return { halfIndex: -1, selected: [] };
+  }
+
+  return { halfIndex, selected: halves[halfIndex] || [] };
 }
 
 function buildGoogleFormPrompt(questions) {
@@ -418,6 +444,7 @@ function fillGoogleFormAnswers(questions, answers) {
     if (q.type === "text") {
       const value = typeof ans.answer === "string" ? ans.answer : "";
       if (!value || !q.input) return;
+      if (normalizeText(q.input.value).length > 0) return;
       q.input.focus();
       q.input.value = value;
       q.input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -432,6 +459,10 @@ function fillGoogleFormAnswers(questions, answers) {
     optionIndices.forEach((n) => {
       const option = q.options[n - 1];
       if (!option) return;
+      if (q.type === "single-choice") {
+        const anySelected = q.options.some((opt) => opt.element.getAttribute("aria-checked") === "true");
+        if (anySelected) return;
+      }
       if (option.element.getAttribute("aria-checked") === "true" && q.type === "multi-choice") return;
       clickChoiceElement(option.element);
     });
@@ -449,7 +480,20 @@ async function handleGoogleFormWithAI() {
     return;
   }
 
-  console.log("[SpachBob] Extracted questions:", questions.map((q) => ({
+  const { halfIndex, selected } = pickQuestionsHalf(questions);
+  if (halfIndex === -1) {
+    console.log("[SpachBob] Both halves already processed. Reload page to run again.");
+    return;
+  }
+
+  if (!selected.length) {
+    console.log("[SpachBob] No questions found for this half.");
+    googleFormRunState.nextHalf = Math.min(googleFormRunState.nextHalf + 1, 2);
+    return;
+  }
+
+  console.log(`[SpachBob] Processing half ${halfIndex + 1}/2 with ${selected.length} questions.`);
+  console.log("[SpachBob] Extracted questions:", selected.map((q) => ({
     index: q.index,
     question: q.question,
     type: q.type,
@@ -457,9 +501,10 @@ async function handleGoogleFormWithAI() {
   })));
 
   try {
-    const answers = await getGoogleFormAnswersFromAI(questions);
+    const answers = await getGoogleFormAnswersFromAI(selected);
     console.log("[SpachBob] AI answers:", answers);
-    fillGoogleFormAnswers(questions, answers);
+    fillGoogleFormAnswers(selected, answers);
+    googleFormRunState.nextHalf = Math.min(googleFormRunState.nextHalf + 1, 2);
     console.log("[SpachBob] Form fill completed.");
   } catch (error) {
     console.error("[SpachBob] Failed to solve Google Form:", error);
