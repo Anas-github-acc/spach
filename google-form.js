@@ -1,5 +1,8 @@
 const GOOGLE_FORM_PROGRESS_STORAGE_KEY = "spachbob_google_form_progress_v1";
 const QUESTIONS_PER_RUN = 10;
+const MAX_IMAGES_PER_QUESTION = 2;
+const MAX_IMAGE_BYTES = 1_500_000;
+const MAX_IMAGES_PER_REQUEST = 8;
 const GOOGLE_FORM_MODELS = [googleFormModel, googleFormFallbackModel1, googleFormFallbackModel2]
   .filter((m) => typeof m === "string" && m.trim().length > 0);
 const GOOGLE_FORM_KEYS = (Array.isArray(apiKeys) && apiKeys.length > 0 ? apiKeys : [apiKey])
@@ -34,20 +37,46 @@ function normalizeText(text) {
   return (text || "").replace(/\s+/g, " ").trim();
 }
 
+function extractQuestionImages(block) {
+  const images = Array.from(block.querySelectorAll("img"));
+  const seen = new Set();
+  const out = [];
+
+  images.forEach((img) => {
+    const src = (img.currentSrc || img.src || "").trim();
+    if (!src || seen.has(src)) return;
+    if (src.startsWith("data:")) return;
+    seen.add(src);
+    out.push({
+      src,
+      alt: normalizeText(img.getAttribute("alt") || "")
+    });
+  });
+
+  return out;
+}
+
 function extractGoogleFormQuestions() {
   const blocks = document.querySelectorAll(".Qr7Oae");
   const questions = [];
 
   blocks.forEach((block, index) => {
     const titleEl = block.querySelector(".M7eMe") || block.querySelector('[role="heading"]');
-    if (!titleEl) return;
-
-    const questionText = normalizeText(titleEl.innerText);
-    if (!questionText) return;
-
+    const images = extractQuestionImages(block);
     const radioOptions = Array.from(block.querySelectorAll('[role="radio"]'));
     const checkboxOptions = Array.from(block.querySelectorAll('[role="checkbox"]'));
     const textInput = block.querySelector('textarea, input[type="text"]');
+
+    const hasAnswerUI = radioOptions.length > 0 || checkboxOptions.length > 0 || !!textInput;
+    if (!hasAnswerUI) return;
+
+    let questionText = titleEl ? normalizeText(titleEl.innerText) : "";
+    if (!questionText && images.length > 0) {
+      questionText = "Image-based question (no text)";
+    }
+    if (!questionText) {
+      questionText = "Question text unavailable";
+    }
 
     if (radioOptions.length > 0) {
       const options = radioOptions
@@ -62,7 +91,8 @@ function extractGoogleFormQuestions() {
           index: index + 1,
           question: questionText,
           type: "single-choice",
-          options
+          options,
+          images
         });
       }
       return;
@@ -81,20 +111,22 @@ function extractGoogleFormQuestions() {
           index: index + 1,
           question: questionText,
           type: "multi-choice",
-          options
+          options,
+          images
         });
       }
       return;
     }
 
     if (textInput) {
-      questions.push({
-        index: index + 1,
-        question: questionText,
-        type: "text",
-        input: textInput
-      });
-    }
+        questions.push({
+          index: index + 1,
+          question: questionText,
+          type: "text",
+          input: textInput,
+          images
+        });
+      }
   });
 
   return questions;
@@ -260,13 +292,17 @@ function maybeResetProgressIfFormCleared(questions) {
 
 function buildGoogleFormPrompt(questions) {
   const lines = questions.map((q) => {
+    const imageNote = Array.isArray(q.images) && q.images.length > 0
+      ? `\n  [images attached: ${q.images.length}]`
+      : "";
+
     if (q.type === "text") {
-      return `${q.index}. [text] ${q.question}`;
+      return `${q.index}. [text] ${q.question}${imageNote}`;
     }
 
     const opts = q.options.map((opt, i) => `  ${i + 1}) ${opt.text}`).join("\n");
     const typeLabel = q.type === "single-choice" ? "single-choice" : "multi-choice";
-    return `${q.index}. [${typeLabel}] ${q.question}\n${opts}`;
+    return `${q.index}. [${typeLabel}] ${q.question}${imageNote}\n${opts}`;
   });
 
   return [
@@ -552,6 +588,76 @@ function parseAnswersRobust(aiText, questions) {
   return normalized;
 }
 
+function guessMimeTypeFromUrl(url) {
+  const src = String(url || "").toLowerCase();
+  if (src.includes(".png")) return "image/png";
+  if (src.includes(".webp")) return "image/webp";
+  if (src.includes(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
+async function fetchImageAsInlinePart(url) {
+  const response = await fetch(url, { credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`Image fetch failed: ${response.status}`);
+  }
+
+  const mimeType = response.headers.get("content-type") || guessMimeTypeFromUrl(url);
+  const buffer = await response.arrayBuffer();
+  if (!buffer || buffer.byteLength === 0) {
+    throw new Error("Image fetch returned empty body");
+  }
+  if (buffer.byteLength > MAX_IMAGE_BYTES) {
+    throw new Error(`Image too large (${buffer.byteLength} bytes)`);
+  }
+
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const data = btoa(binary);
+
+  return {
+    inlineData: {
+      mimeType,
+      data
+    }
+  };
+}
+
+async function buildPromptPartsWithImages(promptText, questions) {
+  const parts = [{ text: promptText }];
+  const tasks = [];
+
+  (questions || []).forEach((q) => {
+    if (!Array.isArray(q.images) || q.images.length === 0) return;
+    q.images.slice(0, MAX_IMAGES_PER_QUESTION).forEach((img, idx) => {
+      tasks.push({
+        questionIndex: q.index,
+        imageIndex: idx + 1,
+        src: img.src,
+        alt: img.alt || ""
+      });
+    });
+  });
+
+  const limitedTasks = tasks.slice(0, MAX_IMAGES_PER_REQUEST);
+  for (const task of limitedTasks) {
+    try {
+      const imagePart = await fetchImageAsInlinePart(task.src);
+      parts.push({ text: `Question ${task.questionIndex} image ${task.imageIndex}${task.alt ? ` alt: ${task.alt}` : ""}` });
+      parts.push(imagePart);
+    } catch (error) {
+      console.warn(
+        `[SpachBob] Skipping image for Q${task.questionIndex} (${task.src}): ${error.message}`
+      );
+    }
+  }
+
+  return parts;
+}
+
 async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) {
   let attempt = 0;
   while (attempt < maxRetries) {
@@ -581,10 +687,11 @@ async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) 
 async function getGoogleFormAnswersFromAI(questions) {
   console.log("getting response...");
   const prompt = buildGoogleFormPrompt(questions);
+  const promptParts = await buildPromptPartsWithImages(prompt, questions);
   const payload = {
     contents: [
       {
-        parts: [{ text: prompt }]
+        parts: promptParts
       }
     ],
     generationConfig: {
