@@ -1,9 +1,12 @@
-const googleFormApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${googleFormApiKey}`;
+const googleFormApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${apiKey}`;
 const GOOGLE_FORM_PROGRESS_STORAGE_KEY = "spachbob_google_form_progress_v1";
+const QUESTIONS_PER_RUN = 10;
 const googleFormRunState = {
   formKey: "",
   signature: "",
-  nextHalf: 0
+  nextChunk: 0,
+  completedChunks: [],
+  lastFailedChunk: null
 };
 
 function isEditableElement(el) {
@@ -114,9 +117,17 @@ function readFormProgress(formKey) {
   const all = readAllFormProgress();
   const entry = all[formKey];
   if (!entry || typeof entry !== "object") return null;
+  const completedChunks = Array.isArray(entry.completedChunks)
+    ? [...new Set(entry.completedChunks.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0))]
+    : [];
+
   return {
     signature: typeof entry.signature === "string" ? entry.signature : "",
-    nextHalf: Number.isInteger(entry.nextHalf) ? Math.max(0, Math.min(2, entry.nextHalf)) : 0
+    nextChunk: Number.isInteger(entry.nextChunk)
+      ? Math.max(0, entry.nextChunk)
+      : (Number.isInteger(entry.nextHalf) ? Math.max(0, entry.nextHalf) : 0),
+    completedChunks,
+    lastFailedChunk: Number.isInteger(entry.lastFailedChunk) ? Math.max(0, entry.lastFailedChunk) : null
   };
 }
 
@@ -124,17 +135,33 @@ function writeFormProgress(formKey, state) {
   const all = readAllFormProgress();
   all[formKey] = {
     signature: state.signature || "",
-    nextHalf: Number.isInteger(state.nextHalf) ? Math.max(0, Math.min(2, state.nextHalf)) : 0,
+    nextChunk: Number.isInteger(state.nextChunk) ? Math.max(0, state.nextChunk) : 0,
+    completedChunks: Array.isArray(state.completedChunks)
+      ? [...new Set(state.completedChunks.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0))]
+      : [],
+    lastFailedChunk: Number.isInteger(state.lastFailedChunk) ? Math.max(0, state.lastFailedChunk) : null,
     updatedAt: Date.now()
   };
   writeAllFormProgress(all);
 }
 
-function setRunState(formKey, signature, nextHalf) {
+function setRunState(formKey, signature, nextChunk, completedChunks = [], lastFailedChunk = null) {
   googleFormRunState.formKey = formKey;
   googleFormRunState.signature = signature;
-  googleFormRunState.nextHalf = Math.max(0, Math.min(2, Number(nextHalf) || 0));
+  googleFormRunState.nextChunk = Math.max(0, Number(nextChunk) || 0);
+  googleFormRunState.completedChunks = Array.isArray(completedChunks)
+    ? [...new Set(completedChunks.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0))]
+    : [];
+  googleFormRunState.lastFailedChunk = Number.isInteger(lastFailedChunk) ? Math.max(0, lastFailedChunk) : null;
   writeFormProgress(formKey, googleFormRunState);
+}
+
+function getNextPendingChunk(totalChunks, completedChunks) {
+  const completedSet = new Set((completedChunks || []).filter((n) => Number.isInteger(n) && n >= 0));
+  for (let i = 0; i < totalChunks; i += 1) {
+    if (!completedSet.has(i)) return i;
+  }
+  return totalChunks;
 }
 
 function pickQuestionsHalf(questions) {
@@ -144,21 +171,43 @@ function pickQuestionsHalf(questions) {
   if (googleFormRunState.formKey !== formKey || googleFormRunState.signature !== signature) {
     const saved = readFormProgress(formKey);
     if (saved && saved.signature === signature) {
-      setRunState(formKey, signature, saved.nextHalf);
+      setRunState(
+        formKey,
+        signature,
+        saved.nextChunk,
+        saved.completedChunks || [],
+        saved.lastFailedChunk
+      );
     } else {
-      setRunState(formKey, signature, 0);
+      setRunState(formKey, signature, 0, [], null);
     }
   }
 
-  const mid = Math.ceil(questions.length / 2);
-  const halves = [questions.slice(0, mid), questions.slice(mid)];
-  const halfIndex = googleFormRunState.nextHalf;
-
-  if (halfIndex > 1) {
-    return { halfIndex: -1, selected: [] };
+  const totalChunks = Math.ceil(questions.length / QUESTIONS_PER_RUN);
+  const pendingChunk = getNextPendingChunk(totalChunks, googleFormRunState.completedChunks);
+  const chunkIndex = Math.max(googleFormRunState.nextChunk, pendingChunk);
+  if (googleFormRunState.nextChunk !== chunkIndex) {
+    setRunState(
+      googleFormRunState.formKey || formKey,
+      googleFormRunState.signature || signature,
+      chunkIndex,
+      googleFormRunState.completedChunks,
+      googleFormRunState.lastFailedChunk
+    );
   }
 
-  return { halfIndex, selected: halves[halfIndex] || [] };
+  const start = chunkIndex * QUESTIONS_PER_RUN;
+  const end = start + QUESTIONS_PER_RUN;
+
+  if (chunkIndex >= totalChunks) {
+    return { halfIndex: -1, selected: [], totalChunks };
+  }
+
+  return {
+    halfIndex: chunkIndex,
+    selected: questions.slice(start, end),
+    totalChunks
+  };
 }
 
 function buildGoogleFormPrompt(questions) {
@@ -185,6 +234,7 @@ function buildGoogleFormPrompt(questions) {
     "- multi-choice: comma-separated option numbers.",
     "- text: short quoted answer.",
     "- No analysis, no bullets, no markdown, no extra words.",
+    "- If you add explanation, still include strict Q<number>:<answer> lines at the end.",
     "Questions:",
     lines.join("\n\n")
   ].join("\n");
@@ -322,7 +372,7 @@ function parseAnswersFromJsonObjectsInText(aiText) {
 function parseAnswersFromNarrativeText(aiText, questions) {
   const out = [];
   const matches = Array.from(
-    String(aiText || "").matchAll(/(?:Question|Q)\s*(\d+)[\s\S]{0,800}?Correct\s*answer\s*:\s*([^\n\r]+)/gi)
+    String(aiText || "").matchAll(/(?:Question|Q)\s*(\d+)[\s\S]{0,1800}?(?:Correct\s*answer|Answer)\s*:\s*([^\n\r]+)/gi)
   );
 
   const typeMap = new Map((questions || []).map((q) => [q.index, q.type]));
@@ -334,6 +384,30 @@ function parseAnswersFromNarrativeText(aiText, questions) {
     const parsedToken = parseLooseAnswerToken(m[2], qType);
     out.push({ question: qNum, type: qType, answer: parsedToken });
   });
+
+  return out;
+}
+
+function parseAnswersFromQuestionBlocks(aiText, questions) {
+  const src = String(aiText || "");
+  const typeMap = new Map((questions || []).map((q) => [q.index, q.type]));
+  const out = [];
+  const qMatches = Array.from(src.matchAll(/(?:^|\n)\s*[*-]?\s*Q\s*(\d+)\s*:/gi));
+
+  for (let i = 0; i < qMatches.length; i += 1) {
+    const start = qMatches[i].index;
+    const end = i + 1 < qMatches.length ? qMatches[i + 1].index : src.length;
+    const block = src.slice(start, end);
+    const qNum = Number(qMatches[i][1]);
+    if (!Number.isInteger(qNum) || qNum <= 0) continue;
+
+    const qType = typeMap.get(qNum) || "single-choice";
+    const answerLine = block.match(/(?:Correct\s*answer|Answer)\s*:\s*([^\n\r]+)/i);
+    if (!answerLine) continue;
+
+    const parsedToken = parseLooseAnswerToken(answerLine[1], qType);
+    out.push({ question: qNum, type: qType, answer: parsedToken });
+  }
 
   return out;
 }
@@ -416,9 +490,10 @@ function parseAnswersRobust(aiText, questions) {
 
   const fromObjects = parseAnswersFromJsonObjectsInText(aiText);
   const fromNarrative = parseAnswersFromNarrativeText(aiText, questions);
+  const fromQuestionBlocks = parseAnswersFromQuestionBlocks(aiText, questions);
 
   const normalized = normalizeAnswersForQuestions(
-    [...compact, ...strict, ...fromObjects, ...fromNarrative],
+    [...compact, ...strict, ...fromObjects, ...fromNarrative, ...fromQuestionBlocks],
     questions
   );
 
@@ -538,23 +613,27 @@ async function handleGoogleFormWithAI() {
     return;
   }
 
-  const { halfIndex, selected } = pickQuestionsHalf(questions);
+  const { halfIndex, selected, totalChunks } = pickQuestionsHalf(questions);
   if (halfIndex === -1) {
-    console.log("[SpachBob] Both halves already processed for this form.");
+    console.log("[SpachBob] All question chunks already processed for this form.");
     return;
   }
 
   if (!selected.length) {
-    console.log("[SpachBob] No questions found for this half.");
+    console.log("[SpachBob] No questions found for this chunk.");
+    const completed = [...new Set([...(googleFormRunState.completedChunks || []), halfIndex])];
+    const nextPending = getNextPendingChunk(totalChunks, completed);
     setRunState(
       googleFormRunState.formKey || getCurrentFormKey(),
       googleFormRunState.signature || buildQuestionsSignature(questions),
-      Math.min(googleFormRunState.nextHalf + 1, 2)
+      nextPending,
+      completed,
+      null
     );
     return;
   }
 
-  console.log(`[SpachBob] Processing half ${halfIndex + 1}/2 with ${selected.length} questions.`);
+  console.log(`[SpachBob] Processing chunk ${halfIndex + 1}/${totalChunks} with ${selected.length} questions.`);
   console.log("[SpachBob] Extracted questions:", selected.map((q) => ({
     index: q.index,
     question: q.question,
@@ -566,13 +645,26 @@ async function handleGoogleFormWithAI() {
     const answers = await getGoogleFormAnswersFromAI(selected);
     console.log("[SpachBob] AI answers:", answers);
     fillGoogleFormAnswers(selected, answers);
+
+    const completed = [...new Set([...(googleFormRunState.completedChunks || []), halfIndex])];
+    const nextPending = getNextPendingChunk(totalChunks, completed);
+
     setRunState(
       googleFormRunState.formKey || getCurrentFormKey(),
       googleFormRunState.signature || buildQuestionsSignature(questions),
-      Math.min(googleFormRunState.nextHalf + 1, 2)
+      nextPending,
+      completed,
+      null
     );
     console.log("[SpachBob] Form fill completed.");
   } catch (error) {
+    setRunState(
+      googleFormRunState.formKey || getCurrentFormKey(),
+      googleFormRunState.signature || buildQuestionsSignature(questions),
+      halfIndex,
+      googleFormRunState.completedChunks || [],
+      halfIndex
+    );
     console.error("[SpachBob] Failed to solve Google Form:", error);
   }
 }
