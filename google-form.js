@@ -206,8 +206,41 @@ function pickQuestionsHalf(questions) {
   return {
     halfIndex: chunkIndex,
     selected: questions.slice(start, end),
-    totalChunks
+    totalChunks,
+    start,
+    end
   };
+}
+
+function isQuestionAnswered(question) {
+  if (!question) return false;
+
+  if (question.type === "text") {
+    return !!(question.input && normalizeText(question.input.value).length > 0);
+  }
+
+  if (!Array.isArray(question.options) || question.options.length === 0) return false;
+  return question.options.some((opt) => opt.element && opt.element.getAttribute("aria-checked") === "true");
+}
+
+function isFormCompletelyUnanswered(questions) {
+  return !(questions || []).some((q) => isQuestionAnswered(q));
+}
+
+function maybeResetProgressIfFormCleared(questions) {
+  const formKey = getCurrentFormKey();
+  const signature = buildQuestionsSignature(questions);
+  const saved = readFormProgress(formKey);
+
+  if (!saved || saved.signature !== signature) return;
+
+  const hasStoredProgress = (saved.nextChunk > 0) || ((saved.completedChunks || []).length > 0);
+  if (!hasStoredProgress) return;
+
+  if (!isFormCompletelyUnanswered(questions)) return;
+
+  console.log("[SpachBob] Form appears cleared. Resetting saved progress to chunk 1.");
+  setRunState(formKey, signature, 0, [], null);
 }
 
 function buildGoogleFormPrompt(questions) {
@@ -577,7 +610,6 @@ function fillGoogleFormAnswers(questions, answers) {
     if (q.type === "text") {
       const value = typeof ans.answer === "string" ? ans.answer : "";
       if (!value || !q.input) return;
-      if (normalizeText(q.input.value).length > 0) return;
       q.input.focus();
       q.input.value = value;
       q.input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -589,14 +621,32 @@ function fillGoogleFormAnswers(questions, answers) {
 
     const optionIndices = [...new Set(ans.answer.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0))];
 
+    if (q.type === "single-choice") {
+      const target = q.options[optionIndices[0] - 1];
+      if (!target) return;
+      clickChoiceElement(target.element);
+      return;
+    }
+
+    if (q.type === "multi-choice") {
+      const targetSet = new Set(optionIndices);
+      q.options.forEach((option, idx) => {
+        const optionNumber = idx + 1;
+        const isChecked = option.element.getAttribute("aria-checked") === "true";
+        const shouldBeChecked = targetSet.has(optionNumber);
+
+        if (shouldBeChecked && !isChecked) {
+          clickChoiceElement(option.element);
+        } else if (!shouldBeChecked && isChecked) {
+          clickChoiceElement(option.element);
+        }
+      });
+      return;
+    }
+
     optionIndices.forEach((n) => {
       const option = q.options[n - 1];
       if (!option) return;
-      if (q.type === "single-choice") {
-        const anySelected = q.options.some((opt) => opt.element.getAttribute("aria-checked") === "true");
-        if (anySelected) return;
-      }
-      if (option.element.getAttribute("aria-checked") === "true" && q.type === "multi-choice") return;
       clickChoiceElement(option.element);
     });
   });
@@ -613,7 +663,9 @@ async function handleGoogleFormWithAI() {
     return;
   }
 
-  const { halfIndex, selected, totalChunks } = pickQuestionsHalf(questions);
+  maybeResetProgressIfFormCleared(questions);
+
+  const { halfIndex, selected, totalChunks, start } = pickQuestionsHalf(questions);
   if (halfIndex === -1) {
     console.log("[SpachBob] All question chunks already processed for this form.");
     return;
@@ -633,8 +685,19 @@ async function handleGoogleFormWithAI() {
     return;
   }
 
+  const previousQuestions = questions.slice(0, start);
+  const unansweredBacklog = previousQuestions.filter((q) => !isQuestionAnswered(q));
+  const runQuestions = [
+    ...selected,
+    ...unansweredBacklog.filter((q) => !selected.some((s) => s.index === q.index))
+  ];
+
   console.log(`[SpachBob] Processing chunk ${halfIndex + 1}/${totalChunks} with ${selected.length} questions.`);
-  console.log("[SpachBob] Extracted questions:", selected.map((q) => ({
+  if (unansweredBacklog.length > 0) {
+    console.log(`[SpachBob] Also retrying ${unansweredBacklog.length} unanswered question(s) from earlier chunks.`);
+  }
+
+  console.log("[SpachBob] Extracted questions:", runQuestions.map((q) => ({
     index: q.index,
     question: q.question,
     type: q.type,
@@ -642,9 +705,9 @@ async function handleGoogleFormWithAI() {
   })));
 
   try {
-    const answers = await getGoogleFormAnswersFromAI(selected);
+    const answers = await getGoogleFormAnswersFromAI(runQuestions);
     console.log("[SpachBob] AI answers:", answers);
-    fillGoogleFormAnswers(selected, answers);
+    fillGoogleFormAnswers(runQuestions, answers);
 
     const completed = [...new Set([...(googleFormRunState.completedChunks || []), halfIndex])];
     const nextPending = getNextPendingChunk(totalChunks, completed);
