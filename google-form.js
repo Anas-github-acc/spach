@@ -1,6 +1,9 @@
-const googleFormApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${apiKey}`;
 const GOOGLE_FORM_PROGRESS_STORAGE_KEY = "spachbob_google_form_progress_v1";
 const QUESTIONS_PER_RUN = 10;
+const GOOGLE_FORM_MODELS = [googleFormModel, googleFormFallbackModel1, googleFormFallbackModel2]
+  .filter((m) => typeof m === "string" && m.trim().length > 0);
+const GOOGLE_FORM_KEYS = (Array.isArray(apiKeys) && apiKeys.length > 0 ? apiKeys : [apiKey])
+  .filter((k) => typeof k === "string" && k.trim().length > 0);
 const googleFormRunState = {
   formKey: "",
   signature: "",
@@ -8,6 +11,18 @@ const googleFormRunState = {
   completedChunks: [],
   lastFailedChunk: null
 };
+
+function buildGenerateContentUrl(modelName, key) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+}
+
+function classifyApiFailure(status, errorText) {
+  const text = String(errorText || "").toLowerCase();
+  const isRateLimit = status === 429 || text.includes("rate") || text.includes("quota") || text.includes("resource_exhausted");
+  const isModelFailure = status === 404 || status === 400 || status === 501 || text.includes("model") || text.includes("not found");
+  const isRetryable = status >= 500 || status === 429;
+  return { isRateLimit, isModelFailure, isRetryable };
+}
 
 function isEditableElement(el) {
   if (!el) return false;
@@ -540,23 +555,31 @@ function parseAnswersRobust(aiText, questions) {
 async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) {
   let attempt = 0;
   while (attempt < maxRetries) {
+    let response;
     try {
-      const response = await fetch(url, options);
-      if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
-        throw new Error(`Retryable status ${response.status}`);
-      }
-      return response;
+      response = await fetch(url, options);
     } catch (error) {
       attempt += 1;
       if (attempt >= maxRetries) throw error;
       const delay = baseDelay * Math.pow(2, attempt - 1);
       await new Promise((resolve) => setTimeout(resolve, delay));
+      continue;
     }
+
+    if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
+      attempt += 1;
+      if (attempt >= maxRetries) return response;
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      continue;
+    }
+
+    return response;
   }
 }
 
 async function getGoogleFormAnswersFromAI(questions) {
-  console.log('getting response...')
+  console.log("getting response...");
   const prompt = buildGoogleFormPrompt(questions);
   const payload = {
     contents: [
@@ -570,27 +593,63 @@ async function getGoogleFormAnswersFromAI(questions) {
     }
   };
 
-  const response = await fetchWithBackoff(googleFormApiUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-
-  if (!response.ok) {
-    throw new Error(`Gemini request failed: ${response.status} ${await response.text()}`);
+  if (!GOOGLE_FORM_MODELS.length) {
+    throw new Error("No configured models available");
+  }
+  if (!GOOGLE_FORM_KEYS.length) {
+    throw new Error("No configured API keys available");
   }
 
-  const result = await response.json();
-  
-  const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-  console.log('raw response:', text);
-  
-  
-  if (!text) {
-    throw new Error("Gemini response missing text");
+  const errors = [];
+
+  for (const model of GOOGLE_FORM_MODELS) {
+    for (const key of GOOGLE_FORM_KEYS) {
+      const url = buildGenerateContentUrl(model, key);
+      let response;
+      try {
+        response = await fetchWithBackoff(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+      } catch (networkError) {
+        errors.push(`[model=${model}] [key=***${key.slice(-4)}] network: ${networkError.message}`);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const failure = classifyApiFailure(response.status, errorText);
+        const shortError = `[model=${model}] [key=***${key.slice(-4)}] status=${response.status} rateLimit=${failure.isRateLimit} modelFailure=${failure.isModelFailure}`;
+        errors.push(shortError);
+        console.warn("[SpachBob] AI call failed:", shortError);
+
+        if (failure.isRateLimit) {
+          console.warn("[SpachBob] Detected rate limit/quota. Trying next API key/model.");
+        } else if (failure.isModelFailure) {
+          console.warn("[SpachBob] Detected model-level failure. Trying fallback model.");
+        }
+        continue;
+      }
+
+      const result = await response.json();
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      console.log(`raw response (model=${model}, key=***${key.slice(-4)}):`, text);
+
+      if (!text) {
+        errors.push(`[model=${model}] [key=***${key.slice(-4)}] empty text response`);
+        continue;
+      }
+
+      try {
+        return parseAnswersRobust(text, questions);
+      } catch (parseError) {
+        errors.push(`[model=${model}] [key=***${key.slice(-4)}] parse: ${parseError.message}`);
+      }
+    }
   }
 
-  return parseAnswersRobust(text, questions);
+  throw new Error(`All key/model attempts failed. Details: ${errors.join(" | ")}`);
 }
 
 function clickChoiceElement(el) {
