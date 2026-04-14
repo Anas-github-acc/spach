@@ -1,6 +1,46 @@
-const apiUrl_ANSWER = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${apiKey}`;
-//  `apiUrl` not in use 
-const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=${apiKey}`;
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+const configuredApiKeys = [];
+if (typeof apiKeys !== 'undefined' && Array.isArray(apiKeys)) {
+  configuredApiKeys.push(...apiKeys.filter(isNonEmptyString));
+}
+if (configuredApiKeys.length === 0 && typeof apiKey !== 'undefined' && isNonEmptyString(apiKey)) {
+  configuredApiKeys.push(apiKey);
+}
+
+const configuredModels = [
+  typeof googleFormModel !== 'undefined' ? googleFormModel : '',
+  typeof googleFormFallbackModel1 !== 'undefined' ? googleFormFallbackModel1 : '',
+  typeof googleFormFallbackModel2 !== 'undefined' ? googleFormFallbackModel2 : ''
+].filter(isNonEmptyString);
+
+function buildGenerateContentUrl(model, key) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+}
+
+const requestTargets = [];
+configuredModels.forEach((model, modelIndex) => {
+  configuredApiKeys.forEach((key, keyIndex) => {
+    requestTargets.push({
+      model,
+      key,
+      modelIndex,
+      keyIndex,
+      url: buildGenerateContentUrl(model, key)
+    });
+  });
+});
+
+const primaryRequestTarget = requestTargets[0] || null;
+const apiUrl_ANSWER = primaryRequestTarget ? primaryRequestTarget.url : '';
+// `apiUrl` retained for backward compatibility with existing logs/help text.
+const apiUrl = apiUrl_ANSWER;
+
+if (!primaryRequestTarget) {
+  console.error("No API key/model configuration found. Please update config.js");
+}
 
 
 function handleMultipleChoiceQuestion(thinkingBudget) {
@@ -212,6 +252,39 @@ function extractANASInner(aiText) {
   return null;
 }
 
+async function callGeminiWithFallback(payload, requestLabel) {
+  if (requestTargets.length === 0) {
+    throw new Error("No request targets configured. Please set apiKey and model values in config.js");
+  }
+
+  let lastError = null;
+  for (const target of requestTargets) {
+    try {
+      console.log(`[${requestLabel}] Trying model=${target.model} key#${target.keyIndex + 1}`);
+
+      const response = await fetchWithBackoff(target.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}: ${await response.text()}`);
+      }
+
+      const result = await response.json();
+      return { result, target };
+    } catch (error) {
+      lastError = error;
+      console.error(`[${requestLabel}] Failed model=${target.model} key#${target.keyIndex + 1}:`, error);
+    }
+  }
+
+  throw lastError || new Error('All configured model/key combinations failed.');
+}
+
 async function getCorrectAnswerFromAI(question, options, thinkingBudget = 0) {
   const optionList = options.map((opt, index) => `ANAS_${index + 1}. ${opt.text}`).join('\n');
   const userPrompt = `
@@ -247,22 +320,10 @@ Please provide only the correct option ANAS_1, ANAS_2, ANAS_3 etc., without any 
   };
 
   try {
-    console.log(`running... ${apiUrl_ANSWER}`)
-    const response = await fetchWithBackoff(apiUrl_ANSWER, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}: ${await response.text()}`);
-    }
-
-    const result = await response.json();
+    const { result, target } = await callGeminiWithFallback(payload, 'MCQ');
     const candidate = result.candidates?.[0];
 
+    console.log(`MCQ answer received from model=${target.model}`);
     console.log("Received response from Gemini API:", JSON.stringify(result, null, 2));
 
     if (candidate && candidate.content?.parts?.[0]?.text) {
@@ -362,22 +423,10 @@ Provide a concise short answer (one sentence or less). Return only the answer te
   };
 
   try {
-    console.log(`running.. ${apiUrl_ANSWER}`)
-    const response = await fetchWithBackoff(apiUrl_ANSWER, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}: ${await response.text()}`);
-    }
-
-    const result = await response.json();
+    const { result, target } = await callGeminiWithFallback(payload, 'ShortAnswer');
     const candidate = result.candidates?.[0];
 
+    console.log(`Short answer received from model=${target.model}`);
     console.log("Received response from Gemini API (short answer):", JSON.stringify(result, null, 2));
 
     if (candidate && candidate.content?.parts?.[0]?.text) {
@@ -428,8 +477,9 @@ window.spachBobHelp = function() {
    - spachBobHelp()          : Show this help message
    - testModelConnection()   : Test API connection manually
 
-⚙️  Current API: Gemini 2.5 Pro
-📡 Model URL: ${apiUrl_ANSWER}
+⚙️  Current model: ${primaryRequestTarget ? primaryRequestTarget.model : 'Not configured'}
+🔑 API keys configured: ${configuredApiKeys.length}
+📡 Model URL: ${apiUrl_ANSWER || 'Not configured'}
   `;
   
   console.log(helpMessage);
@@ -452,32 +502,16 @@ async function testModelConnection() {
   };
 
   try {
-    console.log(`Testing connection to: ${apiUrl_ANSWER}`);
+    console.log(`Testing connection to: ${apiUrl_ANSWER || 'no configured endpoint'}`);
     const startTime = Date.now();
-    
-    const response = await fetch(apiUrl_ANSWER, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+
+    const { result, target } = await callGeminiWithFallback(payload, 'ConnectionTest');
 
     const endTime = Date.now();
     const responseTime = endTime - startTime;
 
     console.log(`Response received in ${responseTime}ms`);
-    console.log(`Status: ${response.status} ${response.statusText}`);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ TEST FAILED - API request failed with status ${response.status}`);
-      console.error(`Error details: ${errorText}`);
-      alert(`❌ Model Test FAILED\nStatus: ${response.status}\nResponse time: ${responseTime}ms\nCheck console for details.`);
-      return false;
-    }
-
-    const result = await response.json();
+    console.log(`Using model: ${target.model}`);
     console.log("API Response:", JSON.stringify(result, null, 2));
 
     const candidate = result.candidates?.[0];
