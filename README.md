@@ -12,6 +12,43 @@ The goal of Spach is to make quiz assistance fast and practical inside the brows
 
 When you open a supported quiz page, the extension detects visible questions, sends the relevant context to an AI model, and then fills in the predicted answers automatically.
 
+## Unified Trigger
+
+Spach now uses a single shortcut across supported pages:
+
+- `Alt + g`
+
+What happens when you press `Alt + g`:
+
+- On Moodle: it extracts the current question, detects its type (`choice` or `short-answer`), asks AI for the answer, and fills the result.
+- On Google Forms: it extracts visible questions in the current chunk, asks AI for structured answers, and fills them.
+
+## Architecture Diagram
+
+```mermaid
+flowchart TD
+	A[User presses Alt+g] --> B{Page Type Router}
+	B -->|Moodle page| C[Extract active question + detect type]
+	B -->|Google Form page| D[Extract visible form questions + types]
+
+	C --> E{Question type}
+	E -->|Choice| F[Build choice prompt]
+	E -->|Short answer| G[Build short-answer prompt]
+
+	D --> H[Build compact multi-question prompt]
+
+	F --> I[Gemini request pipeline<br/>model/key fallback + backoff]
+	G --> I
+	H --> I
+
+	I --> J[Parse AI response]
+	J -->|Moodle| K[Apply answer to current question]
+	J -->|Google Forms| L[Apply answers to form fields/options]
+
+	K --> M[Done + logs]
+	L --> M
+```
+
 ## Setup
 
 To get started, clone this repository and open `config.js`. Add your primary API key in the `apiKey` field:

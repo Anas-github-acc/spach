@@ -3,18 +3,29 @@
   "name": "SpachBob",
   "version": "1.0",
   "description": "This extension is made for moodle to answer the quizes just by pressing 'special keys' keys on your keyboard.",
-  
-  "host_permissions": [
-    "https://generativelanguage.googleapis.com/"
+  "permissions": [
+    "activeTab",
+    "scripting"
   ],
-
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
-        "https://docs.google.com/forms/*",
-        "https://betamoodle.iiitvadodara.ac.in/*"
+        "https://betamoodle.iiitvadodara.ac.in/*",
+        "https://sandbox.moodledemo.net/*"
       ],
-      "js": ["config.js", "content.js", "google-form.js"]
+      "js": ["config.js", "content.js"]
+    },
+    {
+      "matches": [
+        "https://docs.google.com/forms/*"
+      ],
+      "js": ["config.js", "google-form.js"]
     }
   ]
 }

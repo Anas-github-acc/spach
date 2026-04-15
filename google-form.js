@@ -14,6 +14,7 @@ const googleFormRunState = {
   completedChunks: [],
   lastFailedChunk: null
 };
+const IS_GOOGLE_FORM_PAGE = location.hostname.includes("docs.google.com") && location.pathname.startsWith("/forms/");
 
 function buildGenerateContentUrl(modelName, key) {
   return `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
@@ -898,12 +899,14 @@ async function handleGoogleFormWithAI() {
   }
 }
 
-document.addEventListener("keydown", (event) => {
-  if (event.key.toLowerCase() !== "g") return;
-  if (isEditableElement(document.activeElement)) return;
+if (IS_GOOGLE_FORM_PAGE) {
+  document.addEventListener("keydown", (event) => {
+    if (!event.altKey || event.key.toLowerCase() !== "g") return;
+    if (isEditableElement(document.activeElement)) return;
 
-  console.log("[SpachBob] Key 'g' pressed. Processing Google Form...");
-  handleGoogleFormWithAI();
-});
+    console.log("[SpachBob] Alt+g pressed. Processing Google Form...");
+    handleGoogleFormWithAI();
+  });
 
-console.log("[SpachBob] Google Form helper loaded. Press 'g' to auto-fill the form using AI.");
+  console.log("[SpachBob] Google Form helper loaded. Press Alt+g to auto-fill the form using AI.");
+}
