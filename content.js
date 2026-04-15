@@ -599,6 +599,14 @@ function extractANASInner(aiText) {
   return null;
 }
 
+function isRateLimitError(error) {
+  const msg = String(error?.message || error || '').toLowerCase();
+  return msg.includes('429')
+    || msg.includes('too many requests')
+    || msg.includes('resource_exhausted')
+    || msg.includes('quota');
+}
+
 async function callGeminiWithFallback(payload, requestLabel) {
   if (requestTargets.length === 0) {
     throw new Error("No request targets configured. Please set apiKey and model values in config.js");
@@ -625,7 +633,11 @@ async function callGeminiWithFallback(payload, requestLabel) {
       return { result, target };
     } catch (error) {
       lastError = error;
-      console.error(`[${requestLabel}] Failed model=${target.model} key#${target.keyIndex + 1}:`, error);
+      if (isRateLimitError(error)) {
+        console.warn(`[${requestLabel}] Rate-limited model=${target.model} key#${target.keyIndex + 1}: ${error.message || error}`);
+      } else {
+        console.warn(`[${requestLabel}] Failed model=${target.model} key#${target.keyIndex + 1}:`, error);
+      }
     }
   }
 
@@ -670,7 +682,11 @@ async function getCorrectAnswerFromAI(question, options, selectionType = 'single
       return null;
     }
   } catch (error) {
-    console.error("Error calling Gemini API:", error);
+    if (isRateLimitError(error)) {
+      console.warn("Gemini API rate-limited (MCQ).", error.message || error);
+    } else {
+      console.warn("Gemini API call failed (MCQ).", error);
+    }
     return null;
   }
 }
@@ -687,8 +703,12 @@ async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) 
     } catch (error) {
       attempt++;
       if (attempt >= maxRetries) {
-        console.error(`Max retries (${maxRetries}) reached. Error: ${error.message}`);
-        throw error;
+        if (isRateLimitError(error)) {
+          console.warn(`Max retries (${maxRetries}) reached due to rate limit: ${error.message}`);
+        } else {
+          console.warn(`Max retries (${maxRetries}) reached. Error: ${error.message}`);
+        }
+        console.log(`[Spach Error]: ${error}`);
       }
       const delay = baseDelay * Math.pow(2, attempt - 1);
       console.log(`Attempt ${attempt} failed. Retrying in ${delay}ms...`);
@@ -767,7 +787,11 @@ async function getShortAnswerFromAI(question, questionImages = []) {
       return null;
     }
   } catch (error) {
-    console.error("Error calling Gemini API (short answer):", error);
+    if (isRateLimitError(error)) {
+      console.warn("Gemini API rate-limited (short answer).", error.message || error);
+    } else {
+      console.warn("Gemini API call failed (short answer).", error);
+    }
     return null;
   }
 }
