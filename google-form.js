@@ -901,7 +901,7 @@ async function handleGoogleFormWithAI() {
 
 if (IS_GOOGLE_FORM_PAGE) {
   document.addEventListener("keydown", (event) => {
-    if (!event.altKey || event.key.toLowerCase() !== "g") return;
+    if (!((event.altKey || event.metaKey) && event.code === "KeyG")) return;
     if (isEditableElement(document.activeElement)) return;
 
     console.log("[SpachBob] Alt+g pressed. Processing Google Form...");

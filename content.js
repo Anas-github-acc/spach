@@ -883,7 +883,7 @@ if (IS_MOODLE_PAGE) {
       return;
     }
 
-    if (!event.altKey || event.key.toLowerCase() !== 'g') return;
+    if (!((event.altKey || event.metaKey) && event.code === "KeyG")) return;
 
     console.log("Alt+g pressed. Processing current Moodle question with AI...");
     handleActiveMoodleQuestionWithAI(0).catch(error => {
