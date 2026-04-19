@@ -5,7 +5,8 @@
   "description": "This extension is made for moodle to answer the quizes just by pressing 'special keys' keys on your keyboard.",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -19,13 +20,13 @@
         "https://betamoodle.iiitvadodara.ac.in/*",
         "https://sandbox.moodledemo.net/*"
       ],
-      "js": ["config.js", "content.js"]
+      "js": ["config.js", "service.js", "content.js"]
     },
     {
       "matches": [
         "https://docs.google.com/forms/*"
       ],
-      "js": ["config.js", "google-form.js"]
+      "js": ["config.js", "service.js", "google-form.js"]
     }
   ]
 }

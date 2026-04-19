@@ -3,10 +3,20 @@ const QUESTIONS_PER_RUN = 10;
 const MAX_IMAGES_PER_QUESTION = 2;
 const MAX_IMAGE_BYTES = 1_500_000;
 const MAX_IMAGES_PER_REQUEST = 8;
-const GOOGLE_FORM_MODELS = [googleFormModel, googleFormFallbackModel1, googleFormFallbackModel2]
-  .filter((m) => typeof m === "string" && m.trim().length > 0);
-const GOOGLE_FORM_KEYS = (Array.isArray(apiKeys) && apiKeys.length > 0 ? apiKeys : [apiKey])
-  .filter((k) => typeof k === "string" && k.trim().length > 0);
+const SPACH_SERVICE = window.SpachBobService;
+if (!SPACH_SERVICE) {
+  console.error("SpachBobService is missing. Ensure service.js is loaded before google-form.js");
+}
+
+const GOOGLE_FORM_MODELS = SPACH_SERVICE
+  ? SPACH_SERVICE.getConfiguredModels([googleFormModel, googleFormFallbackModel1, googleFormFallbackModel2])
+  : [];
+const GOOGLE_FORM_KEYS = SPACH_SERVICE
+  ? SPACH_SERVICE.getConfiguredApiKeys(Array.isArray(apiKeys) ? apiKeys : [], apiKey)
+  : [];
+const GOOGLE_FORM_REQUEST_TARGETS = SPACH_SERVICE
+  ? SPACH_SERVICE.buildRequestTargets(GOOGLE_FORM_MODELS, GOOGLE_FORM_KEYS)
+  : [];
 const googleFormRunState = {
   formKey: "",
   signature: "",
@@ -15,18 +25,6 @@ const googleFormRunState = {
   lastFailedChunk: null
 };
 const IS_GOOGLE_FORM_PAGE = location.hostname.includes("docs.google.com") && location.pathname.startsWith("/forms/");
-
-function buildGenerateContentUrl(modelName, key) {
-  return `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
-}
-
-function classifyApiFailure(status, errorText) {
-  const text = String(errorText || "").toLowerCase();
-  const isRateLimit = status === 429 || text.includes("rate") || text.includes("quota") || text.includes("resource_exhausted");
-  const isModelFailure = status === 404 || status === 400 || status === 501 || text.includes("model") || text.includes("not found");
-  const isRetryable = status >= 500 || status === 429;
-  return { isRateLimit, isModelFailure, isRetryable };
-}
 
 function isEditableElement(el) {
   if (!el) return false;
@@ -659,32 +657,6 @@ async function buildPromptPartsWithImages(promptText, questions) {
   return parts;
 }
 
-async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) {
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    let response;
-    try {
-      response = await fetch(url, options);
-    } catch (error) {
-      attempt += 1;
-      if (attempt >= maxRetries) throw error;
-      const delay = baseDelay * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      continue;
-    }
-
-    if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
-      attempt += 1;
-      if (attempt >= maxRetries) return response;
-      const delay = baseDelay * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      continue;
-    }
-
-    return response;
-  }
-}
-
 async function getGoogleFormAnswersFromAI(questions) {
   console.log("getting response...");
   const prompt = buildGoogleFormPrompt(questions);
@@ -710,51 +682,45 @@ async function getGoogleFormAnswersFromAI(questions) {
 
   const errors = [];
 
-  for (const model of GOOGLE_FORM_MODELS) {
-    for (const key of GOOGLE_FORM_KEYS) {
-      const url = buildGenerateContentUrl(model, key);
-      let response;
-      try {
-        response = await fetchWithBackoff(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-      } catch (networkError) {
-        errors.push(`[model=${model}] [key=***${key.slice(-4)}] network: ${networkError.message}`);
-        continue;
-      }
+  try {
+    const { value } = await SPACH_SERVICE.callGeminiWithFallback({
+      payload,
+      requestTargets: GOOGLE_FORM_REQUEST_TARGETS,
+      requestLabel: "GoogleForm",
+      transformResult: (result, target) => {
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        console.log(`raw response (model=${target.model}, key=***${target.key.slice(-4)}):`, text);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        const failure = classifyApiFailure(response.status, errorText);
-        const shortError = `[model=${model}] [key=***${key.slice(-4)}] status=${response.status} rateLimit=${failure.isRateLimit} modelFailure=${failure.isModelFailure}`;
-        errors.push(shortError);
-        console.warn("[SpachBob] AI call failed:", shortError);
-
-        if (failure.isRateLimit) {
-          console.warn("[SpachBob] Detected rate limit/quota. Trying next API key/model.");
-        } else if (failure.isModelFailure) {
-          console.warn("[SpachBob] Detected model-level failure. Trying fallback model.");
+        if (!text) {
+          throw new Error("empty text response");
         }
-        continue;
-      }
 
-      const result = await response.json();
-      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-      console.log(`raw response (model=${model}, key=***${key.slice(-4)}):`, text);
-
-      if (!text) {
-        errors.push(`[model=${model}] [key=***${key.slice(-4)}] empty text response`);
-        continue;
-      }
-
-      try {
         return parseAnswersRobust(text, questions);
-      } catch (parseError) {
-        errors.push(`[model=${model}] [key=***${key.slice(-4)}] parse: ${parseError.message}`);
+      },
+      onAttemptFailed: (error, target) => {
+        const maskedKey = target?.key ? `***${target.key.slice(-4)}` : "***";
+
+        if (typeof error?.status === "number") {
+          const failure = SPACH_SERVICE.classifyApiFailure(error.status, error.errorText || error.message);
+          const shortError = `[model=${target.model}] [key=${maskedKey}] status=${error.status} rateLimit=${failure.isRateLimit} modelFailure=${failure.isModelFailure}`;
+          errors.push(shortError);
+          console.warn("[SpachBob] AI call failed:", shortError);
+
+          if (failure.isRateLimit) {
+            console.warn("[SpachBob] Detected rate limit/quota. Trying next API key/model.");
+          } else if (failure.isModelFailure) {
+            console.warn("[SpachBob] Detected model-level failure. Trying fallback model.");
+          }
+          return;
+        }
+
+        errors.push(`[model=${target.model}] [key=${maskedKey}] ${error.message || String(error)}`);
       }
-    }
+    });
+
+    return value;
+  } catch (_err) {
+    // Re-throw with aggregated details for easier debugging.
   }
 
   throw new Error(`All key/model attempts failed. Details: ${errors.join(" | ")}`);

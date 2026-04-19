@@ -26,13 +26,17 @@ What happens when you press `Alt + g`:
 
 ## Setup
 
-To get started, clone this repository and open `config.js`. Add your primary API key in the `apiKey` field:
+To get started, clone this repository and open `config.js`. Add your API keys in the `apiKeys` list:
 
 ```js
-const apiKey = "YOUR_API_KEY";
+const apiKeys = [
+	"YOUR_PRIMARY_API_KEY",
+	"YOUR_FALLBACK_API_KEY_1",
+	"YOUR_FALLBACK_API_KEY_2"
+].filter((k) => typeof k === "string" && k.trim().length > 0);
 ```
 
-You can also add fallback keys and adjust model names in the same file if needed. After configuration, open your browser's extension page (for example, `chrome://extensions`), enable Developer mode, and choose Load unpacked to load this project folder. Once loaded, open a supported Moodle or Google Forms quiz page and use the extension.
+You can add as many keys as needed in that list and adjust model names in the same file. After configuration, open your browser's extension page (for example, `chrome://extensions`), enable Developer mode, and choose Load unpacked to load this project folder. Once loaded, open a supported Moodle or Google Forms quiz page and use the extension.
 
 ## Roadmap
 

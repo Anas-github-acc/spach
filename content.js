@@ -1,37 +1,27 @@
-function isNonEmptyString(value) {
-  return typeof value === 'string' && value.trim().length > 0;
+const SPACH_SERVICE = window.SpachBobService;
+
+if (!SPACH_SERVICE) {
+  console.error("SpachBobService is missing. Ensure service.js is loaded before content.js");
 }
 
-const configuredApiKeys = [];
-if (typeof apiKeys !== 'undefined' && Array.isArray(apiKeys)) {
-  configuredApiKeys.push(...apiKeys.filter(isNonEmptyString));
-}
-if (configuredApiKeys.length === 0 && typeof apiKey !== 'undefined' && isNonEmptyString(apiKey)) {
-  configuredApiKeys.push(apiKey);
-}
+const configuredApiKeys = SPACH_SERVICE
+  ? SPACH_SERVICE.getConfiguredApiKeys(
+    typeof apiKeys !== 'undefined' ? apiKeys : [],
+    typeof apiKey !== 'undefined' ? apiKey : ''
+  )
+  : [];
 
-const configuredModels = [
-  typeof googleFormModel !== 'undefined' ? googleFormModel : '',
-  typeof googleFormFallbackModel1 !== 'undefined' ? googleFormFallbackModel1 : '',
-  typeof googleFormFallbackModel2 !== 'undefined' ? googleFormFallbackModel2 : ''
-].filter(isNonEmptyString);
+const configuredModels = SPACH_SERVICE
+  ? SPACH_SERVICE.getConfiguredModels([
+    typeof googleFormModel !== 'undefined' ? googleFormModel : '',
+    typeof googleFormFallbackModel1 !== 'undefined' ? googleFormFallbackModel1 : '',
+    typeof googleFormFallbackModel2 !== 'undefined' ? googleFormFallbackModel2 : ''
+  ])
+  : [];
 
-function buildGenerateContentUrl(model, key) {
-  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-}
-
-const requestTargets = [];
-configuredModels.forEach((model, modelIndex) => {
-  configuredApiKeys.forEach((key, keyIndex) => {
-    requestTargets.push({
-      model,
-      key,
-      modelIndex,
-      keyIndex,
-      url: buildGenerateContentUrl(model, key)
-    });
-  });
-});
+const requestTargets = SPACH_SERVICE
+  ? SPACH_SERVICE.buildRequestTargets(configuredModels, configuredApiKeys)
+  : [];
 
 const primaryRequestTarget = requestTargets[0] || null;
 const apiUrl_ANSWER = primaryRequestTarget ? primaryRequestTarget.url : '';
@@ -98,30 +88,82 @@ function parseDataUrl(dataUrl) {
   };
 }
 
+function isExtensionContextInvalidatedError(error) {
+  const msg = String(error?.message || error || '').toLowerCase();
+  return msg.includes('extension context invalidated');
+}
+
+function getRuntimeDebugSnapshot() {
+  try {
+    return {
+      hasChrome: typeof chrome !== 'undefined',
+      hasRuntime: !!chrome?.runtime,
+      runtimeIdPresent: !!chrome?.runtime?.id,
+      hasSendMessage: typeof chrome?.runtime?.sendMessage === 'function',
+      pageUrl: location.href,
+      pageReadyState: document.readyState
+    };
+  } catch (error) {
+    return {
+      snapshotError: error?.message || String(error)
+    };
+  }
+}
+
+function logExtensionContextDebug(scope, error, extra = {}) {
+  const details = {
+    scope,
+    errorMessage: error?.message || String(error),
+    errorName: error?.name || '',
+    stack: error?.stack || '',
+    runtime: getRuntimeDebugSnapshot(),
+    ...extra
+  };
+
+  console.error('[SpachBob][Debug] Extension context diagnostic', details);
+}
+
 function fetchImageViaBackground(url) {
   return new Promise((resolve, reject) => {
     console.log(`[SpachBob][CS] Requesting background image fetch: ${url}`);
 
-    chrome.runtime.sendMessage(
-      { action: 'fetchImageAsDataUrl', url },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          console.error(`[SpachBob][CS] Background fetch runtime error: ${url}`, chrome.runtime.lastError.message);
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        if (!response || !response.success || !response.dataUrl) {
-          console.error(`[SpachBob][CS] Background fetch failed response: ${url}`, response);
-          reject(new Error((response && response.error) || 'Background image fetch failed'));
-          return;
-        }
-
-        console.log(
-          `[SpachBob][CS] Background fetch success: ${url} (mime=${response.mimeType || 'unknown'})`
-        );
-        resolve(response);
+    try {
+      if (!chrome?.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+        reject(new Error('Extension context unavailable for background image fetch'));
+        return;
       }
-    );
+
+      chrome.runtime.sendMessage(
+        { action: 'fetchImageAsDataUrl', url },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.error(`[SpachBob][CS] Background fetch runtime error: ${url}`, chrome.runtime.lastError.message);
+            const runtimeError = new Error(chrome.runtime.lastError.message);
+            if (isExtensionContextInvalidatedError(runtimeError)) {
+              logExtensionContextDebug('fetchImageViaBackground.sendMessageCallback', runtimeError, { url });
+            }
+            reject(runtimeError);
+            return;
+          }
+          if (!response || !response.success || !response.dataUrl) {
+            console.error(`[SpachBob][CS] Background fetch failed response: ${url}`, response);
+            reject(new Error((response && response.error) || 'Background image fetch failed'));
+            return;
+          }
+
+          console.log(
+            `[SpachBob][CS] Background fetch success: ${url} (mime=${response.mimeType || 'unknown'})`
+          );
+          resolve(response);
+        }
+      );
+    } catch (error) {
+      console.error(`[SpachBob][CS] Background fetch exception: ${url}`, error);
+      if (isExtensionContextInvalidatedError(error)) {
+        logExtensionContextDebug('fetchImageViaBackground.tryCatch', error, { url });
+      }
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 
@@ -453,7 +495,6 @@ async function handleActiveMoodleQuestionWithAI(thinkingBudget = 0) {
   console.log(`[SpachBob] Unsupported question type: ${extracted.type}`);
 }
 
-
 function handleMultipleChoiceQuestion(thinkingBudget) {
   const questionBlock = document.querySelector('.formulation.clearfix');
   if (!questionBlock) {
@@ -599,50 +640,6 @@ function extractANASInner(aiText) {
   return null;
 }
 
-function isRateLimitError(error) {
-  const msg = String(error?.message || error || '').toLowerCase();
-  return msg.includes('429')
-    || msg.includes('too many requests')
-    || msg.includes('resource_exhausted')
-    || msg.includes('quota');
-}
-
-async function callGeminiWithFallback(payload, requestLabel) {
-  if (requestTargets.length === 0) {
-    throw new Error("No request targets configured. Please set apiKey and model values in config.js");
-  }
-
-  let lastError = null;
-  for (const target of requestTargets) {
-    try {
-      console.log(`[${requestLabel}] Trying model=${target.model} key#${target.keyIndex + 1}`);
-
-      const response = await fetchWithBackoff(target.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}: ${await response.text()}`);
-      }
-
-      const result = await response.json();
-      return { result, target };
-    } catch (error) {
-      lastError = error;
-      if (isRateLimitError(error)) {
-        console.warn(`[${requestLabel}] Rate-limited model=${target.model} key#${target.keyIndex + 1}: ${error.message || error}`);
-      } else {
-        console.warn(`[${requestLabel}] Failed model=${target.model} key#${target.keyIndex + 1}:`, error);
-      }
-    }
-  }
-
-  throw lastError || new Error('All configured model/key combinations failed.');
-}
 
 async function getCorrectAnswerFromAI(question, options, selectionType = 'single-choice', questionImages = [], thinkingBudget = 0) {
   const userPrompt = buildMoodleQuestionPrompt(selectionType, question, options);
@@ -668,7 +665,11 @@ async function getCorrectAnswerFromAI(question, options, selectionType = 'single
   };
 
   try {
-    const { result, target } = await callGeminiWithFallback(payload, 'MCQ');
+    const { result, target } = await SPACH_SERVICE.callGeminiWithFallback({
+      payload,
+      requestTargets,
+      requestLabel: 'MCQ'
+    });
     const candidate = result.candidates?.[0];
 
     console.log(`MCQ answer received from model=${target.model}`);
@@ -682,38 +683,23 @@ async function getCorrectAnswerFromAI(question, options, selectionType = 'single
       return null;
     }
   } catch (error) {
-    if (isRateLimitError(error)) {
+    if (isExtensionContextInvalidatedError(error)) {
+      logExtensionContextDebug('getCorrectAnswerFromAI', error, {
+        questionLength: String(question || '').length,
+        optionCount: Array.isArray(options) ? options.length : 0,
+        imageCount: Array.isArray(questionImages) ? questionImages.length : 0,
+        requestTargetCount: Array.isArray(requestTargets) ? requestTargets.length : 0,
+        configuredApiKeys: configuredApiKeys.length,
+        configuredModels: configuredModels
+      });
+    }
+
+    if (SPACH_SERVICE.isRateLimitError(error)) {
       console.warn("Gemini API rate-limited (MCQ).", error.message || error);
     } else {
       console.warn("Gemini API call failed (MCQ).", error);
     }
     return null;
-  }
-}
-
-async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) {
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      const response = await fetch(url, options);
-      if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
-        throw new Error(`Retryable error: Status ${response.status}`);
-      }
-      return response;
-    } catch (error) {
-      attempt++;
-      if (attempt >= maxRetries) {
-        if (isRateLimitError(error)) {
-          console.warn(`Max retries (${maxRetries}) reached due to rate limit: ${error.message}`);
-        } else {
-          console.warn(`Max retries (${maxRetries}) reached. Error: ${error.message}`);
-        }
-        console.log(`[Spach Error]: ${error}`);
-      }
-      const delay = baseDelay * Math.pow(2, attempt - 1);
-      console.log(`Attempt ${attempt} failed. Retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
   }
 }
 
@@ -773,7 +759,11 @@ async function getShortAnswerFromAI(question, questionImages = []) {
   };
 
   try {
-    const { result, target } = await callGeminiWithFallback(payload, 'ShortAnswer');
+    const { result, target } = await SPACH_SERVICE.callGeminiWithFallback({
+      payload,
+      requestTargets,
+      requestLabel: 'ShortAnswer'
+    });
     const candidate = result.candidates?.[0];
 
     console.log(`Short answer received from model=${target.model}`);
@@ -787,7 +777,7 @@ async function getShortAnswerFromAI(question, questionImages = []) {
       return null;
     }
   } catch (error) {
-    if (isRateLimitError(error)) {
+    if (SPACH_SERVICE.isRateLimitError(error)) {
       console.warn("Gemini API rate-limited (short answer).", error.message || error);
     } else {
       console.warn("Gemini API call failed (short answer).", error);
@@ -810,18 +800,18 @@ window.spachBobHelp = function() {
 ║       │  - Fills selected option or short answer           ║
 ╚═══════╧════════════════════════════════════════════════════╝
 
-📌 Usage:
+  Usage:
   - Press Alt+g on a Moodle quiz question page
    - Check browser console for detailed logs
    - Call spachBobHelp() in console to see this help again
 
-🔧 Functions available in console:
+  Functions available in console:
    - spachBobHelp()          : Show this help message
    - testModelConnection()   : Test API connection manually
 
-⚙️  Current model: ${primaryRequestTarget ? primaryRequestTarget.model : 'Not configured'}
-🔑 API keys configured: ${configuredApiKeys.length}
-📡 Model URL: ${apiUrl_ANSWER || 'Not configured'}
+  Current model: ${primaryRequestTarget ? primaryRequestTarget.model : 'Not configured'}
+  API keys configured: ${configuredApiKeys.length}
+  Model URL: ${apiUrl_ANSWER || 'Not configured'}
   `;
   
   console.log(helpMessage);
@@ -847,7 +837,11 @@ async function testModelConnection() {
     console.log(`Testing connection to: ${apiUrl_ANSWER || 'no configured endpoint'}`);
     const startTime = Date.now();
 
-    const { result, target } = await callGeminiWithFallback(payload, 'ConnectionTest');
+    const { result, target } = await SPACH_SERVICE.callGeminiWithFallback({
+      payload,
+      requestTargets,
+      requestLabel: 'ConnectionTest'
+    });
 
     const endTime = Date.now();
     const responseTime = endTime - startTime;
@@ -877,7 +871,7 @@ async function testModelConnection() {
 
 if (IS_MOODLE_PAGE) {
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'h' || event.key === 'H') {
+    if ((event.altKey || event.metaKey) && event.code === "KeyH") {
       console.log("Key 'h/H' pressed. Showing help...");
       spachBobHelp();
       return;
