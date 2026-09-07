@@ -4,24 +4,9 @@ if (!SPACH_SERVICE) {
   console.error("SpachBobService is missing. Ensure service.js is loaded before content.js");
 }
 
-const configuredApiKeys = SPACH_SERVICE
-  ? SPACH_SERVICE.getConfiguredApiKeys(
-    typeof apiKeys !== 'undefined' ? apiKeys : [],
-    typeof apiKey !== 'undefined' ? apiKey : ''
-  )
-  : [];
-
-const configuredModels = SPACH_SERVICE
-  ? SPACH_SERVICE.getConfiguredModels([
-    typeof googleFormModel !== 'undefined' ? googleFormModel : '',
-    typeof googleFormFallbackModel1 !== 'undefined' ? googleFormFallbackModel1 : '',
-    typeof googleFormFallbackModel2 !== 'undefined' ? googleFormFallbackModel2 : ''
-  ])
-  : [];
-
-const requestTargets = SPACH_SERVICE
-  ? SPACH_SERVICE.buildRequestTargets(configuredModels, configuredApiKeys)
-  : [];
+const AI_PROVIDER = 'opencode';
+const AI_CONFIG = window.SpachAiConfig;
+const requestTargets = AI_CONFIG?.requestTargets || [];
 
 const primaryRequestTarget = requestTargets[0] || null;
 const apiUrl_ANSWER = primaryRequestTarget ? primaryRequestTarget.url : '';
@@ -32,7 +17,7 @@ const IS_MOODLE_PAGE =
   || location.hostname.includes('sandbox.moodledemo.net');
 
 if (!primaryRequestTarget) {
-  console.error("No API key/model configuration found. Please update config.js");
+  console.error("No OpenCode model configuration found. Please update config.js");
 }
 
 function normalizeText(text) {
@@ -645,38 +630,29 @@ async function getCorrectAnswerFromAI(question, options, selectionType = 'single
   const userPrompt = buildMoodleQuestionPrompt(selectionType, question, options);
   const promptParts = await buildMoodlePromptPartsWithImages(userPrompt, questionImages);
 
-  console.log("Sending prompt to Gemini API:", userPrompt);
+  console.log(`Sending prompt to ${AI_PROVIDER} API:`, userPrompt);
 
-  const payload = {
-    contents: [{
-      parts: promptParts
-    }],
-    // safetySettings: [
-    //   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-    //   { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-    //   { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-    //   { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-    // ],
-    // generationConfig: {
-    //   thinkingConfig: {
-    //     thinkingBudget
-    //   }
-    // }
-  };
+  const payload = SPACH_SERVICE.buildOpenCodePayload(promptParts, {
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: 'text/plain'
+    },
+    temperature: 0
+  });
 
   try {
-    const { result, target } = await SPACH_SERVICE.callGeminiWithFallback({
+    const { result, target } = await SPACH_SERVICE.callOpenCode({
       payload,
       requestTargets,
-      requestLabel: 'MCQ'
+      requestLabel: `MCQ/${AI_PROVIDER}`
     });
-    const candidate = result.candidates?.[0];
 
     console.log(`MCQ answer received from model=${target.model}`);
-    console.log("Received response from Gemini API:", JSON.stringify(result, null, 2));
+    console.log(`Received response from ${AI_PROVIDER} API:`, JSON.stringify(result, null, 2));
 
-    if (candidate && candidate.content?.parts?.[0]?.text) {
-      const aiText = candidate.content.parts[0].text.trim().replace(/^"|"$/g, '');
+    const rawText = SPACH_SERVICE.extractTextFromOpenCodeResult(result);
+    if (rawText) {
+      const aiText = rawText.trim().replace(/^"|"$/g, '');
       return aiText;
     } else {
       console.log("No valid content found in AI response:", JSON.stringify(result, null, 2));
@@ -689,15 +665,14 @@ async function getCorrectAnswerFromAI(question, options, selectionType = 'single
         optionCount: Array.isArray(options) ? options.length : 0,
         imageCount: Array.isArray(questionImages) ? questionImages.length : 0,
         requestTargetCount: Array.isArray(requestTargets) ? requestTargets.length : 0,
-        configuredApiKeys: configuredApiKeys.length,
-        configuredModels: configuredModels
+        configuredModels: AI_CONFIG?.models || []
       });
     }
 
     if (SPACH_SERVICE.isRateLimitError(error)) {
-      console.warn("Gemini API rate-limited (MCQ).", error.message || error);
+      console.warn(`${AI_PROVIDER} API rate-limited (MCQ).`, error.message || error);
     } else {
-      console.warn("Gemini API call failed (MCQ).", error);
+      console.warn(`${AI_PROVIDER} API call failed (MCQ).`, error);
     }
     return null;
   }
@@ -747,30 +722,27 @@ async function getShortAnswerFromAI(question, questionImages = []) {
   const userPrompt = buildMoodleQuestionPrompt('text', question);
   const promptParts = await buildMoodlePromptPartsWithImages(userPrompt, questionImages);
 
-  const payload = {
-    contents: [{
-      parts: promptParts
-    }],  
+  const payload = SPACH_SERVICE.buildOpenCodePayload(promptParts, {
     generationConfig: {
-      thinkingConfig: {
-        thinkingBudget: 1024
-      }
-    }
-  };
+      temperature: 0,
+      responseMimeType: 'text/plain'
+    },
+    temperature: 0
+  });
 
   try {
-    const { result, target } = await SPACH_SERVICE.callGeminiWithFallback({
+    const { result, target } = await SPACH_SERVICE.callOpenCode({
       payload,
       requestTargets,
-      requestLabel: 'ShortAnswer'
+      requestLabel: `ShortAnswer/${AI_PROVIDER}`
     });
-    const candidate = result.candidates?.[0];
 
     console.log(`Short answer received from model=${target.model}`);
-    console.log("Received response from Gemini API (short answer):", JSON.stringify(result, null, 2));
+    console.log(`Received response from ${AI_PROVIDER} API (short answer):`, JSON.stringify(result, null, 2));
 
-    if (candidate && candidate.content?.parts?.[0]?.text) {
-      const aiText = candidate.content.parts[0].text.trim().replace(/^"|"$/g, '');
+    const rawText = SPACH_SERVICE.extractTextFromOpenCodeResult(result);
+    if (rawText) {
+      const aiText = rawText.trim().replace(/^"|"$/g, '');
       return aiText;
     } else {
       console.log("No valid content found in AI response (short answer):", JSON.stringify(result, null, 2));
@@ -778,9 +750,9 @@ async function getShortAnswerFromAI(question, questionImages = []) {
     }
   } catch (error) {
     if (SPACH_SERVICE.isRateLimitError(error)) {
-      console.warn("Gemini API rate-limited (short answer).", error.message || error);
+      console.warn(`${AI_PROVIDER} API rate-limited (short answer).`, error.message || error);
     } else {
-      console.warn("Gemini API call failed (short answer).", error);
+      console.warn(`${AI_PROVIDER} API call failed (short answer).`, error);
     }
     return null;
   }
@@ -809,8 +781,9 @@ window.spachBobHelp = function() {
    - spachBobHelp()          : Show this help message
    - testModelConnection()   : Test API connection manually
 
+  AI provider: ${AI_PROVIDER}
   Current model: ${primaryRequestTarget ? primaryRequestTarget.model : 'Not configured'}
-  API keys configured: ${configuredApiKeys.length}
+  Auth tokens configured: ${(AI_CONFIG?.keys || []).filter((k) => typeof k === 'string' && k.trim().length > 0).length}
   Model URL: ${apiUrl_ANSWER || 'Not configured'}
   `;
   
@@ -824,23 +797,23 @@ window.testModelConnection = testModelConnection;
 async function testModelConnection() {
   console.log("=== Testing Model Connection ===");
   const testPrompt = "Say 'ANAS_OK_ANAS' if you receive this message.";
-  
-  const payload = {
-    contents: [{
-      parts: [{
-        text: testPrompt
-      }]
-    }]
-  };
 
   try {
     console.log(`Testing connection to: ${apiUrl_ANSWER || 'no configured endpoint'}`);
     const startTime = Date.now();
 
-    const { result, target } = await SPACH_SERVICE.callGeminiWithFallback({
-      payload,
+  const payloadForProvider = SPACH_SERVICE.buildOpenCodePayload([{ text: testPrompt }], {
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'text/plain'
+      },
+      temperature: 0
+    });
+
+    const { result, target } = await SPACH_SERVICE.callOpenCode({
+      payload: payloadForProvider,
       requestTargets,
-      requestLabel: 'ConnectionTest'
+      requestLabel: `ConnectionTest/${AI_PROVIDER}`
     });
 
     const endTime = Date.now();
@@ -850,12 +823,12 @@ async function testModelConnection() {
     console.log(`Using model: ${target.model}`);
     console.log("API Response:", JSON.stringify(result, null, 2));
 
-    const candidate = result.candidates?.[0];
-    if (candidate && candidate.content?.parts?.[0]?.text) {
-      const aiText = candidate.content.parts[0].text.trim();
+    const aiText = SPACH_SERVICE.extractTextFromOpenCodeResult(result);
+    if (aiText) {
+      const cleanText = aiText.trim();
       console.log(`✅ TEST PASSED - Model responded: "${aiText}"`);
       console.log(`Response time: ${responseTime}ms`);
-      alert(`✅ Model Test SUCCESSFUL\nResponse: "${aiText}"\nResponse time: ${responseTime}ms`);
+      alert(`✅ Model Test SUCCESSFUL\nProvider: ${AI_PROVIDER}\nResponse: "${cleanText}"\nResponse time: ${responseTime}ms`);
       return true;
     } else {
       console.error("❌ TEST FAILED - No valid content in response");
@@ -871,6 +844,7 @@ async function testModelConnection() {
 
 if (IS_MOODLE_PAGE) {
   document.addEventListener('keydown', (event) => {
+    if (window.handleSpachModelShortcut?.(event)) return;
     if ((event.altKey || event.metaKey) && event.code === "KeyH") {
       console.log("Key 'h/H' pressed. Showing help...");
       spachBobHelp();

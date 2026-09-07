@@ -20,13 +20,13 @@
         "https://betamoodle.iiitvadodara.ac.in/*",
         "https://sandbox.moodledemo.net/*"
       ],
-      "js": ["config.js", "service.js", "content.js"]
+      "js": ["config.js", "service.js", "ai-config.js", "content.js"]
     },
     {
       "matches": [
         "https://docs.google.com/forms/*"
       ],
-      "js": ["config.js", "service.js", "google-form.js"]
+      "js": ["config.js", "service.js", "ai-config.js", "google-form.js"]
     }
   ]
 }

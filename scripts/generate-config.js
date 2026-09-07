@@ -26,26 +26,21 @@ if (!fs.existsSync(envPath)) {
 
 const env = parseEnv(fs.readFileSync(envPath, 'utf8'));
 
-const candidates = [
-  'SPACHBOB_API_KEY',
-  'API_KEY',
-  'REACT_APP_API_KEY',
-  'VITE_API_KEY'
-];
+const candidates = ['OPENCODE_API_KEY'];
 
-let apiKey = null;
+let openCodeApiKey = null;
 for (const k of candidates) {
   if (env[k]) {
-    apiKey = env[k];
+    openCodeApiKey = env[k];
     break;
   }
 }
 
-if (!apiKey) {
-  console.error('No API key found in .env.local. Tried keys:', candidates.join(', '));
+if (!openCodeApiKey) {
+  console.error('No OpenCode API key found in .env.local. Tried keys:', candidates.join(', '));
   process.exit(1);
 }
 
-const outContent = `window.__SPACHBOB_API_KEY__ = ${JSON.stringify(apiKey)};\n`;
+const outContent = `window.__SPACHBOB_OPENCODE_API_KEY__ = ${JSON.stringify(openCodeApiKey)};\n`;
 fs.writeFileSync(outPath, outContent, 'utf8');
 console.log('Wrote', outPath);

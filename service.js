@@ -1,10 +1,12 @@
 ;(function initSpachBobService(global) {
 	const CURR_API_KEY_STORAGE_KEY = "currApiKey";
+	const CURR_MODEL_STORAGE_KEY = "currModel";
 	const KEY_STATE_STORAGE_KEY = "keyState";
 	const RPM_COOLDOWN_MS = 2 * 60 * 1000;
 	const IST_OFFSET_MINUTES = 330;
 	const inMemorySelectionState = {
 		currApiKey: 0,
+		currModel: 0,
 		keyState: {},
 		updatedAt: 0
 	};
@@ -56,6 +58,27 @@
 		}
 	}
 
+	function canUseChromeRuntimeMessaging() {
+		try {
+			return typeof chrome !== "undefined"
+				&& !!chrome.runtime
+				&& !!chrome.runtime.id
+				&& typeof chrome.runtime.sendMessage === "function";
+		} catch (_err) {
+			return false;
+		}
+	}
+
+	function isLoopbackUrl(url) {
+		try {
+			const parsed = new URL(String(url || ""), location.href);
+			const host = String(parsed.hostname || "").toLowerCase();
+			return host === "127.0.0.1" || host === "localhost" || host === "::1";
+		} catch (_err) {
+			return false;
+		}
+	}
+
 	function normalizeKeyState(raw) {
 		const out = {
 			keyState: {},
@@ -89,6 +112,7 @@
 	function cloneSelectionState(state) {
 		return {
 			currApiKey: Number(state?.currApiKey) || 0,
+			currModel: Number(state?.currModel) || 0,
 			keyState: { ...(state?.keyState || {}) },
 			updatedAt: Number(state?.updatedAt) || Date.now()
 		};
@@ -148,17 +172,25 @@
 		return 0;
 	}
 
+	function getCurrentModelIndexFromStorageValue(raw, modelCount = 3) {
+		const index = Number(raw);
+		if (!Number.isInteger(index) || index < 0) return 0;
+		return modelCount > 0 ? index % modelCount : index;
+	}
+
 	async function getStoredSelectionState() {
 		if (!canUseChromeStorage()) {
 			return cloneSelectionState(inMemorySelectionState);
 		}
 
-		const result = await readStorageLocal([CURR_API_KEY_STORAGE_KEY, KEY_STATE_STORAGE_KEY]);
+		const result = await readStorageLocal([CURR_API_KEY_STORAGE_KEY, CURR_MODEL_STORAGE_KEY, KEY_STATE_STORAGE_KEY]);
 		const currApiKey = getCurrentApiKeyIndexFromStorageValue(result[CURR_API_KEY_STORAGE_KEY]);
+		const currModel = getCurrentModelIndexFromStorageValue(result[CURR_MODEL_STORAGE_KEY]);
 		const normalized = normalizeKeyState({ keyState: result[KEY_STATE_STORAGE_KEY] });
 
 		return {
 			currApiKey,
+			currModel,
 			keyState: normalized.keyState,
 			updatedAt: Date.now()
 		};
@@ -167,6 +199,7 @@
 	async function saveStoredSelectionState(state) {
 		const safeState = cloneSelectionState({
 			currApiKey: Number(state?.currApiKey) || 0,
+			currModel: Number(state?.currModel) || 0,
 			keyState: normalizeKeyState({ keyState: state?.keyState || {} }).keyState,
 			updatedAt: Date.now()
 		});
@@ -178,18 +211,28 @@
 
 		await writeStorageLocal({
 			[CURR_API_KEY_STORAGE_KEY]: safeState.currApiKey,
+			[CURR_MODEL_STORAGE_KEY]: safeState.currModel,
 			[KEY_STATE_STORAGE_KEY]: safeState.keyState
 		});
 	}
 
-	function getApiKeyId(apiKey) {
-		const key = String(apiKey || "");
+	async function setSelectedModelIndex(modelIndex, modelCount) {
+		const safeIndex = getCurrentModelIndexFromStorageValue(modelIndex, modelCount);
+		inMemorySelectionState.currModel = safeIndex;
+		const state = await getStoredSelectionState();
+		state.currModel = safeIndex;
+		await saveStoredSelectionState(state);
+		return safeIndex;
+	}
+
+	function getAuthKeyId(authKey) {
+		const key = String(authKey || "");
 		if (!key) return "key-empty";
 		return `k${key.length}_${key.slice(-6)}`;
 	}
 
 	function getTargetKeyId(target) {
-		return getApiKeyId(target?.key || "");
+		return getAuthKeyId(target?.key || "");
 	}
 
 	function pruneExpiredCooldowns(state, now = Date.now()) {
@@ -377,40 +420,195 @@
 		await saveStoredSelectionState(state);
 	}
 
-	function getConfiguredApiKeys(apiKeysList, fallbackApiKey) {
-		const keys = [];
-		if (Array.isArray(apiKeysList)) {
-			keys.push(...apiKeysList.filter(isNonEmptyString));
-		}
-		if (keys.length === 0 && isNonEmptyString(fallbackApiKey)) {
-			keys.push(fallbackApiKey);
-		}
-		return keys;
-	}
-
 	function getConfiguredModels(models) {
 		if (!Array.isArray(models)) return [];
 		return models.filter(isNonEmptyString);
 	}
 
-	function buildGenerateContentUrl(modelName, key) {
-		return `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+	function buildOpenCodeChatCompletionsUrl(baseUrl) {
+		const fallback = "http://127.0.0.1:4096/v1";
+		const safeBase = isNonEmptyString(baseUrl) ? baseUrl.trim() : fallback;
+		if (/\/chat\/completions\/?$/i.test(safeBase)) {
+			return safeBase.replace(/\/+$/, "");
+		}
+		return `${safeBase.replace(/\/+$/, "")}/chat/completions`;
 	}
 
-	function buildRequestTargets(models, keys) {
+	function buildOpenCodeServerBaseUrl(baseUrl) {
+		const fallback = "http://127.0.0.1:4096";
+		const safeBase = isNonEmptyString(baseUrl) ? baseUrl.trim() : fallback;
+		const noTrailing = safeBase.replace(/\/+$/, "");
+		if (/\/v1\/chat\/completions$/i.test(noTrailing)) {
+			return noTrailing.replace(/\/v1\/chat\/completions$/i, "");
+		}
+		if (/\/chat\/completions$/i.test(noTrailing)) {
+			return noTrailing.replace(/\/chat\/completions$/i, "");
+		}
+		if (/\/v1$/i.test(noTrailing)) {
+			return noTrailing.replace(/\/v1$/i, "");
+		}
+		return noTrailing;
+	}
+
+	function buildOpenCodeRequestTargets(models, keys, baseUrl) {
 		const out = [];
+		const serverBaseUrl = buildOpenCodeServerBaseUrl(baseUrl);
+		const url = `${serverBaseUrl}/session`;
+		const safeKeys = Array.isArray(keys) && keys.length > 0 ? keys : [""];
+
 		(models || []).forEach((model, modelIndex) => {
-			(keys || []).forEach((key, keyIndex) => {
+			safeKeys.forEach((key, keyIndex) => {
 				out.push({
 					model,
-					key,
+					key: isNonEmptyString(key) ? key : "",
 					modelIndex,
 					keyIndex,
-					url: buildGenerateContentUrl(model, key)
+						serverBaseUrl,
+					url
 				});
 			});
 		});
+
 		return out;
+	}
+
+	function prioritizeTargetsBySelectedModel(requestTargets, selectedModelIndex, preferredKeyIndex) {
+		const byModel = new Map();
+		(requestTargets || []).forEach((target) => {
+			const modelIndex = Number(target?.modelIndex);
+			if (!Number.isInteger(modelIndex) || modelIndex < 0) return;
+			if (!byModel.has(modelIndex)) byModel.set(modelIndex, []);
+			byModel.get(modelIndex).push(target);
+		});
+
+		const modelIndices = [...byModel.keys()].sort((a, b) => a - b);
+		if (!modelIndices.length) return [];
+		const start = modelIndices.indexOf(Number(selectedModelIndex));
+		const orderedModelIndices = start < 0
+			? modelIndices
+			: [...modelIndices.slice(start), ...modelIndices.slice(0, start)];
+		const ordered = [];
+
+		orderedModelIndices.forEach((modelIndex) => {
+			const targets = byModel.get(modelIndex) || [];
+			const preferred = targets.find((target) => Number(target.keyIndex) === Number(preferredKeyIndex));
+			ordered.push(preferred || targets[0]);
+		});
+
+		return ordered;
+	}
+
+	function mapPromptPartsToOpenCodeContent(promptParts) {
+		const content = [];
+
+		(promptParts || []).forEach((part) => {
+			if (isNonEmptyString(part?.text)) {
+				content.push({ type: "text", text: part.text });
+				return;
+			}
+
+			if (isNonEmptyString(part?.inlineData?.data)) {
+				const mimeType = isNonEmptyString(part?.inlineData?.mimeType)
+					? part.inlineData.mimeType
+					: "image/jpeg";
+				content.push({
+					type: "image_url",
+					image_url: {
+						url: `data:${mimeType};base64,${part.inlineData.data}`
+					}
+				});
+			}
+		});
+
+		if (content.length === 1 && content[0]?.type === "text") {
+			return content[0].text;
+		}
+
+		return content;
+	}
+
+	function buildOpenCodePayload(promptParts, options = {}) {
+		return {
+			messages: [{ role: "user", content: mapPromptPartsToOpenCodeContent(promptParts) }],
+			temperature: Number.isFinite(options.temperature) ? options.temperature : 0
+		};
+	}
+
+	function extractTextFromOpenCodeResult(result) {
+		const sessionParts = Array.isArray(result?.parts) ? result.parts : [];
+			if (sessionParts.length > 0) {
+				const text = sessionParts
+					.filter((part) => part && (part.type === "text" || part.type === "reasoning") && isNonEmptyString(part.text))
+					.map((part) => part.text)
+					.join("\n")
+					.trim();
+				if (text) return text;
+			}
+
+			const nestedParts = Array.isArray(result?.data?.parts) ? result.data.parts : [];
+			if (nestedParts.length > 0) {
+				const text = nestedParts
+					.filter((part) => part && (part.type === "text" || part.type === "reasoning") && isNonEmptyString(part.text))
+					.map((part) => part.text)
+					.join("\n")
+					.trim();
+				if (text) return text;
+			}
+
+			const content = result?.choices?.[0]?.message?.content;
+			if (typeof content === "string") return content;
+			if (Array.isArray(content)) {
+				return content
+					.map((part) => (typeof part?.text === "string" ? part.text : ""))
+					.filter(Boolean)
+					.join("\n")
+					.trim();
+			}
+		return "";
+	}
+
+	function splitOpenCodeModelId(model) {
+		const raw = String(model || "").trim();
+		const idx = raw.indexOf("/");
+		if (idx <= 0) {
+			return {
+				providerID: "opencode",
+				modelID: raw || "gpt-5.1-codex"
+			};
+		}
+
+		return {
+			providerID: raw.slice(0, idx),
+			modelID: raw.slice(idx + 1)
+		};
+	}
+
+	function buildOpenCodePromptTextFromPayload(payload) {
+		const lines = [];
+		const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+
+		messages.forEach((message) => {
+			const content = message?.content;
+			if (typeof content === "string") {
+				if (isNonEmptyString(content)) lines.push(content.trim());
+				return;
+			}
+
+			if (!Array.isArray(content)) return;
+
+			content.forEach((part) => {
+				if (part?.type === "text" && isNonEmptyString(part?.text)) {
+					lines.push(part.text.trim());
+					return;
+				}
+
+				if (part?.type === "image_url" && isNonEmptyString(part?.image_url?.url)) {
+					lines.push(`[image] ${part.image_url.url}`);
+				}
+			});
+		});
+
+		return lines.join("\n\n").trim();
 	}
 
 	function classifyApiFailure(status, errorText, errorPayload) {
@@ -446,11 +644,17 @@
 	}
 
 	async function fetchWithBackoff(url, options, maxRetries = 3, baseDelay = 1000) {
+		const fetchImpl = typeof options?.fetchImpl === "function"
+			? options.fetchImpl
+			: (canUseChromeRuntimeMessaging() && isLoopbackUrl(url) ? fetchViaBackground : fetch);
+		const requestOptions = { ...(options || {}) };
+		delete requestOptions.fetchImpl;
+
 		let attempt = 0;
 		while (attempt < maxRetries) {
 			let response;
 			try {
-				response = await fetch(url, options);
+				response = await fetchImpl(url, requestOptions);
 			} catch (error) {
 				attempt += 1;
 				if (attempt >= maxRetries) throw error;
@@ -471,7 +675,96 @@
 		}
 	}
 
-	async function callGeminiWithFallback({
+	function createResponseLikeFromBackgroundPayload(payload) {
+		const status = Number(payload?.status) || 0;
+		const headersMap = {};
+		const rawHeaders = payload?.headers && typeof payload.headers === "object"
+			? payload.headers
+			: {};
+
+		Object.keys(rawHeaders).forEach((key) => {
+			headersMap[String(key || "").toLowerCase()] = String(rawHeaders[key] || "");
+		});
+
+		const bodyText = String(payload?.bodyText || "");
+
+		return {
+			ok: status >= 200 && status < 300,
+			status,
+			statusText: String(payload?.statusText || ""),
+			headers: {
+				get(name) {
+					return headersMap[String(name || "").toLowerCase()] || null;
+				}
+			},
+			async text() {
+				return bodyText;
+			},
+			async json() {
+				if (!bodyText) return {};
+				return JSON.parse(bodyText);
+			}
+		};
+	}
+
+	function fetchViaBackground(url, options = {}) {
+		return new Promise((resolve, reject) => {
+			if (!canUseChromeRuntimeMessaging()) {
+				reject(new Error("Extension context unavailable for background HTTP proxy"));
+				return;
+			}
+
+			const timeoutMs = (() => {
+				const n = Number(options?.timeoutMs);
+				if (!Number.isFinite(n) || n <= 0) return 45000;
+				return Math.max(1000, Math.floor(n));
+			})();
+
+			let payloadBody = undefined;
+			if (typeof options?.body === "string") payloadBody = options.body;
+			else if (options?.body != null) payloadBody = String(options.body);
+
+			const message = {
+				action: "proxyHttpRequest",
+				url,
+				method: String(options?.method || "GET").toUpperCase(),
+				headers: options?.headers && typeof options.headers === "object" ? options.headers : {},
+				body: payloadBody,
+				timeoutMs
+			};
+
+			try {
+				let settled = false;
+				const callbackTimeout = setTimeout(() => {
+					if (settled) return;
+					settled = true;
+					reject(new Error(`Background proxy callback timed out after ${timeoutMs}ms for ${message.method} ${url}`));
+				}, timeoutMs + 1500);
+
+				chrome.runtime.sendMessage(message, (response) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(callbackTimeout);
+
+					if (chrome.runtime?.lastError) {
+						reject(new Error(chrome.runtime.lastError.message || "Background proxy runtime error"));
+						return;
+					}
+
+					if (!response || !response.success) {
+						reject(new Error(response?.error || "Background proxy request failed"));
+						return;
+					}
+
+					resolve(createResponseLikeFromBackgroundPayload(response));
+				});
+			} catch (error) {
+				reject(error);
+			}
+		});
+	}
+
+	async function callOpenCodeWithFallback({
 		payload,
 		requestTargets,
 		requestLabel = "AI",
@@ -481,24 +774,25 @@
 		onAttemptFailed
 	}) {
 		if (!Array.isArray(requestTargets) || requestTargets.length === 0) {
-			throw new Error("No request targets configured. Please set apiKey and model values in config.js");
+			throw new Error("No OpenCode request targets configured. Please set opencode model/server values in config.js");
 		}
 
 		const stateNow = Date.now();
 		const storedState = pruneExpiredCooldowns(await getStoredSelectionState(), stateNow);
 		await saveStoredSelectionState(storedState);
 
-		const orderedTargets = prioritizeTargetsByPreferredKey(requestTargets, storedState.currApiKey);
+		const orderedTargets = prioritizeTargetsBySelectedModel(
+			requestTargets,
+			storedState.currModel,
+			storedState.currApiKey
+		);
 		const { available, blocked } = splitTargetsByCooldown(orderedTargets, storedState.keyState, stateNow);
 		let targetsToTry = available;
 
 		if (targetsToTry.length === 0 && blocked.length > 0) {
-			// If all keys are cooling down, try the one that becomes available first.
 			targetsToTry = [blocked[0].target];
-			const waitMs = Math.max(0, blocked[0].expiresAt - stateNow);
-			console.warn(`[${requestLabel}] All keys are on cooldown. Trying earliest key after ${waitMs}ms window.`);
 		} else if (blocked.length > 0) {
-			console.log(`[${requestLabel}] Skipping ${blocked.length} cooled-down key/model target(s).`);
+			console.log(`[${requestLabel}] Skipping ${blocked.length} cooled-down OpenCode target(s).`);
 		}
 
 		if (Number.isInteger(targetsToTry[0]?.keyIndex) && targetsToTry[0].keyIndex >= 0) {
@@ -511,29 +805,79 @@
 
 		for (const target of targetsToTry) {
 			try {
-				const targetKeyId = getTargetKeyId(target);
-				if (runtimeBlockedKeyIds.has(targetKeyId)) {
-					continue;
+				const targetModelIndex = Number(target?.modelIndex);
+				if (runtimeBlockedKeyIds.has(targetModelIndex)) continue;
+
+				console.log(`[${requestLabel}] Trying OpenCode model=${target.model} key#${target.keyIndex + 1}`);
+
+				const headers = { "Content-Type": "application/json" };
+				if (isNonEmptyString(target.key)) {
+					headers.Authorization = `Bearer ${target.key}`;
 				}
 
-				console.log(`[${requestLabel}] Trying model=${target.model} key#${target.keyIndex + 1}`);
-
-				const response = await fetchWithBackoff(
-					target.url,
+				const serverBaseUrl = buildOpenCodeServerBaseUrl(target?.serverBaseUrl || target?.url || "");
+				console.log(`[${requestLabel}] Creating OpenCode session at ${serverBaseUrl}/session`);
+				const createSessionResponse = await fetchWithBackoff(
+					`${serverBaseUrl}/session`,
 					{
 						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify(payload)
+						headers,
+						body: JSON.stringify({}),
+						timeoutMs: 45000,
+						fetchImpl: fetchViaBackground
 					},
 					maxRetries,
 					baseDelay
 				);
+				console.log(`[${requestLabel}] OpenCode session create status=${createSessionResponse.status}`);
+
+				if (!createSessionResponse.ok) {
+					const createSessionErrorText = await createSessionResponse.text();
+					const createSessionPayload = parseApiErrorPayload(createSessionErrorText);
+					const createSessionFailure = classifyApiFailure(createSessionResponse.status, createSessionErrorText, createSessionPayload);
+					const createSessionError = new Error(`OpenCode session create failed with status ${createSessionResponse.status}: ${createSessionErrorText}`);
+					createSessionError.status = createSessionResponse.status;
+					createSessionError.errorText = createSessionErrorText;
+					createSessionError.errorPayload = createSessionPayload;
+					createSessionError.target = target;
+					createSessionError.failure = createSessionFailure;
+					createSessionError.quotaId = createSessionFailure.quotaId || "";
+					throw createSessionError;
+				}
+
+				const createdSession = await createSessionResponse.json();
+				const sessionId = String(createdSession?.id || "").trim();
+				if (!sessionId) {
+					throw new Error("OpenCode server returned an invalid session id");
+				}
+
+				const model = splitOpenCodeModelId(target.model);
+				const promptText = buildOpenCodePromptTextFromPayload(payload);
+				const sessionPromptBody = {
+					model,
+					parts: [{ type: "text", text: promptText || "Respond with plain text." }]
+				};
+				console.log(`[${requestLabel}] Sending OpenCode message session=${sessionId} provider=${model.providerID} model=${model.modelID}`);
+
+				const response = await fetchWithBackoff(
+					`${serverBaseUrl}/session/${encodeURIComponent(sessionId)}/message`,
+					{
+						method: "POST",
+						headers,
+						body: JSON.stringify(sessionPromptBody),
+						timeoutMs: 120000,
+						fetchImpl: fetchViaBackground
+					},
+					maxRetries,
+					baseDelay
+				);
+				console.log(`[${requestLabel}] OpenCode message status=${response.status}`);
 
 				if (!response.ok) {
 					const errorText = await response.text();
 					const errorPayload = parseApiErrorPayload(errorText);
 					const failure = classifyApiFailure(response.status, errorText, errorPayload);
-					const error = new Error(`API request failed with status ${response.status}: ${errorText}`);
+					const error = new Error(`OpenCode request failed with status ${response.status}: ${errorText}`);
 					error.status = response.status;
 					error.errorText = errorText;
 					error.errorPayload = errorPayload;
@@ -545,27 +889,22 @@
 
 				const result = await response.json();
 				await markTargetSuccess(target);
+
 				if (typeof transformResult === "function") {
 					const value = await transformResult(result, target);
 					return { result, target, value };
 				}
+
 				return { result, target };
 			} catch (error) {
 				lastError = error;
 
-				if (isExtensionContextInvalidatedError(error)) {
-					logServiceContextDebug("callGeminiWithFallback.loop", error, {
-						requestLabel,
-						targetModel: target?.model || "",
-						targetKeyIndex: Number(target?.keyIndex),
-						targetsToTryCount: targetsToTry.length,
-						runtimeBlockedCount: runtimeBlockedKeyIds.size
-					});
-				}
-
 				if (error?.failure?.isRateLimit || isRateLimitError(error)) {
-					runtimeBlockedKeyIds.add(getTargetKeyId(target));
+					runtimeBlockedKeyIds.add(Number(target?.modelIndex));
 					await markTargetRateLimited(target, error.failure, requestTargets);
+				}
+				if (!error?.failure?.isRateLimit && !isRateLimitError(error)) {
+					runtimeBlockedKeyIds.add(Number(target?.modelIndex));
 				}
 
 				if (typeof onAttemptFailed === "function") {
@@ -573,28 +912,52 @@
 				}
 
 				if (isRateLimitError(error)) {
-					const quotaPart = error?.failure?.quotaId ? ` quotaId=${error.failure.quotaId}` : "";
-					console.warn(`[${requestLabel}] Rate-limited model=${target.model} key#${target.keyIndex + 1}${quotaPart}: ${error.message || error}`);
+					console.warn(`[${requestLabel}] OpenCode rate-limited model=${target.model} key#${target.keyIndex + 1}: ${error.message || error}`);
 				} else {
-					console.warn(`[${requestLabel}] Failed model=${target.model} key#${target.keyIndex + 1}:`, error);
+					console.warn(`[${requestLabel}] OpenCode failed model=${target.model} key#${target.keyIndex + 1}:`, error);
 				}
 			}
 		}
 
-		throw lastError || new Error("All configured model/key combinations failed.");
+		throw lastError || new Error("All configured OpenCode model/key combinations failed.");
+	}
+
+	async function callOpenCode({
+		payload,
+		requestTargets,
+		requestLabel = "AI",
+		maxRetries = 3,
+		baseDelay = 1000,
+		transformResult,
+		onAttemptFailed
+	}) {
+		return callOpenCodeWithFallback({
+			payload,
+			requestTargets,
+			requestLabel,
+			maxRetries,
+			baseDelay,
+			transformResult,
+			onAttemptFailed
+		});
 	}
 
 	global.SpachBobService = {
 		isNonEmptyString,
-		getConfiguredApiKeys,
 		getConfiguredModels,
-		buildGenerateContentUrl,
-		buildRequestTargets,
+		buildOpenCodeServerBaseUrl,
+		buildOpenCodeChatCompletionsUrl,
+		buildOpenCodeRequestTargets,
+		buildOpenCodePayload,
+		extractTextFromOpenCodeResult,
 		extractQuotaId,
 		getRateLimitExpiryEndIns,
 		classifyApiFailure,
 		isRateLimitError,
 		fetchWithBackoff,
-		callGeminiWithFallback
+		callOpenCodeWithFallback,
+		callOpenCode
+		,
+		setSelectedModelIndex
 	};
 })(window);

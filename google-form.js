@@ -8,15 +8,10 @@ if (!SPACH_SERVICE) {
   console.error("SpachBobService is missing. Ensure service.js is loaded before google-form.js");
 }
 
-const GOOGLE_FORM_MODELS = SPACH_SERVICE
-  ? SPACH_SERVICE.getConfiguredModels([googleFormModel, googleFormFallbackModel1, googleFormFallbackModel2])
-  : [];
-const GOOGLE_FORM_KEYS = SPACH_SERVICE
-  ? SPACH_SERVICE.getConfiguredApiKeys(Array.isArray(apiKeys) ? apiKeys : [], apiKey)
-  : [];
-const GOOGLE_FORM_REQUEST_TARGETS = SPACH_SERVICE
-  ? SPACH_SERVICE.buildRequestTargets(GOOGLE_FORM_MODELS, GOOGLE_FORM_KEYS)
-  : [];
+const AI_PROVIDER = "opencode";
+const AI_CONFIG = window.SpachAiConfig;
+const PROVIDER_MODELS = AI_CONFIG?.models || [];
+const GOOGLE_FORM_REQUEST_TARGETS = AI_CONFIG?.requestTargets || [];
 const googleFormRunState = {
   formKey: "",
   signature: "",
@@ -661,34 +656,27 @@ async function getGoogleFormAnswersFromAI(questions) {
   console.log("getting response...");
   const prompt = buildGoogleFormPrompt(questions);
   const promptParts = await buildPromptPartsWithImages(prompt, questions);
-  const payload = {
-    contents: [
-      {
-        parts: promptParts
-      }
-    ],
+
+  if (!PROVIDER_MODELS.length) {
+    throw new Error("No configured models available");
+  }
+  const payload = SPACH_SERVICE.buildOpenCodePayload(promptParts, {
     generationConfig: {
       temperature: 0,
       responseMimeType: "text/plain"
-    }
-  };
-
-  if (!GOOGLE_FORM_MODELS.length) {
-    throw new Error("No configured models available");
-  }
-  if (!GOOGLE_FORM_KEYS.length) {
-    throw new Error("No configured API keys available");
-  }
+    },
+    temperature: 0
+  });
 
   const errors = [];
 
   try {
-    const { value } = await SPACH_SERVICE.callGeminiWithFallback({
+    const { value } = await SPACH_SERVICE.callOpenCode({
       payload,
       requestTargets: GOOGLE_FORM_REQUEST_TARGETS,
-      requestLabel: "GoogleForm",
+      requestLabel: `GoogleForm/${AI_PROVIDER}`,
       transformResult: (result, target) => {
-        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = SPACH_SERVICE.extractTextFromOpenCodeResult(result);
         console.log(`raw response (model=${target.model}, key=***${target.key.slice(-4)}):`, text);
 
         if (!text) {
@@ -702,7 +690,7 @@ async function getGoogleFormAnswersFromAI(questions) {
 
         if (typeof error?.status === "number") {
           const failure = SPACH_SERVICE.classifyApiFailure(error.status, error.errorText || error.message);
-          const shortError = `[model=${target.model}] [key=${maskedKey}] status=${error.status} rateLimit=${failure.isRateLimit} modelFailure=${failure.isModelFailure}`;
+          const shortError = `[provider=${AI_PROVIDER}] [model=${target.model}] [key=${maskedKey}] status=${error.status} rateLimit=${failure.isRateLimit} modelFailure=${failure.isModelFailure}`;
           errors.push(shortError);
           console.warn("[SpachBob] AI call failed:", shortError);
 
@@ -867,6 +855,7 @@ async function handleGoogleFormWithAI() {
 
 if (IS_GOOGLE_FORM_PAGE) {
   document.addEventListener("keydown", (event) => {
+    if (window.handleSpachModelShortcut?.(event)) return;
     if (!((event.altKey || event.metaKey) && event.code === "KeyG")) return;
     if (isEditableElement(document.activeElement)) return;
 
