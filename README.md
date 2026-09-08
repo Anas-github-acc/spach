@@ -25,6 +25,22 @@ What happens when you press `Alt + g`:
 - On Moodle: it extracts the current question, detects its type (`choice` or `short-answer`), asks AI for the answer, and fills the result.
 - On Google Forms: it extracts visible questions in the current chunk, asks AI for structured answers, and fills them.
 
+Connection test shortcut:
+
+- Linux/Windows: `Alt + t`
+- macOS: `Command + Option + t` (`⌘ + ⌥ + t`)
+
+This opens an input box, sends your message to the active model, and displays the returned text.
+
+The shared answer instruction used for quiz requests is:
+
+> Just answer. Do not provide reasoning or any extra information.
+
+Variants are sent to OpenCode separately from the prompt, equivalent to `--variant`:
+
+- Model 1: `medium`
+- Model 4: `medium`
+
 
 ## Setup
 
@@ -38,10 +54,13 @@ Spach uses OpenCode as its only AI backend. Configure the OpenCode server and mo
 const openCodeBaseUrl = "http://127.0.0.1:4096";
 const openCodeApiKey = ""; // optional Bearer token for a protected server
 const MODEL_PREFERENCES = [
-  "opencode/nemotron-3-ultra-free", // Model 1
-  "opencode/mimo-v2.5-free", // Model 2
-  "opencode/nemotron-3.5-lightning-free" // Model 3
+  "opencode/muse-spark-1.2-contributor-free", // Model 1 - image support
+  "opencode/mimo-v2.5-free", // Model 2 - recommended, image support
+  "opencode/nemotron-3-ultra-free", // Model 3 - text only
+  "opencode/ling-3.0-flash-fin-free", // Model 4 - fastest, text only
+  "opencode/big-pickle" // Model 5 - text only
 ];
+const MODEL_VARIANTS = ["medium", "", "", "medium", ""];
 ```
 
 Each model is a `provider/model` string. The array position is its model number.
@@ -65,15 +84,16 @@ it is not a model/provider API key. For a local server without HTTP authenticati
 To test a model directly from the terminal, start the server first and run:
 
 ```bash
-node scripts/test-opencode-model.js opencode/nemotron-3-ultra-free
+node scripts/test-opencode-model.js opencode/mimo-v2.5-free
 ```
 
-Replace the model name to test Model 2 or Model 3. You can also test the active model from
+Replace the model name to test any configured model. You can also test the active model from
 the Moodle page by opening DevTools and running `testModelConnection()` in the console.
 
 Model selection shortcuts:
 
-- `Alt + 1`, `Alt + 2`, `Alt + 3` select the corresponding model from `MODEL_PREFERENCES`.
+- `Alt + 1` through `Alt + 5` select the corresponding model from `MODEL_PREFERENCES`.
+- Model 2 (`opencode/mimo-v2.5-free`) is the default starting model.
 - The selected model remains the starting model for later requests.
 - If it fails, the other configured models are tried in cyclic order once each.
 

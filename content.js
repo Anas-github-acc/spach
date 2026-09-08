@@ -766,14 +766,18 @@ window.spachBobHelp = function() {
 ╠════════════════════════════════════════════════════════════╣
 ║  Key  │  Action                                            ║
 ╠═══════╪════════════════════════════════════════════════════╣
-║ Alt+g │  Solve Current Moodle Question                     ║
+║ Alt+g │  Solve question (Linux / Windows)                  ║
+║ ⌘+g   │  Solve question (macOS)                            ║
 ║       │  - Detects question type automatically             ║
 ║       │  - Gets answer from AI                             ║
 ║       │  - Fills selected option or short answer           ║
+║ Alt+t │  Test model connection (Linux / Windows)           ║
+║ ⌘+⌥+t │  Test model connection (macOS)                     ║
 ╚═══════╧════════════════════════════════════════════════════╝
 
   Usage:
-  - Press Alt+g on a Moodle quiz question page
+  - Press Alt+g (Linux/Windows) or ⌘+g (macOS) on a Moodle page
+  - Press Alt+t (Linux/Windows) or ⌘+⌥+t (macOS) to test the model
    - Check browser console for detailed logs
    - Call spachBobHelp() in console to see this help again
 
@@ -786,61 +790,10 @@ window.spachBobHelp = function() {
   Auth tokens configured: ${(AI_CONFIG?.keys || []).filter((k) => typeof k === 'string' && k.trim().length > 0).length}
   Model URL: ${apiUrl_ANSWER || 'Not configured'}
   `;
-  
+
   console.log(helpMessage);
   return "Help displayed in console ✓";
 };
-
-// Make testModelConnection globally accessible
-window.testModelConnection = testModelConnection;
-
-async function testModelConnection() {
-  console.log("=== Testing Model Connection ===");
-  const testPrompt = "Say 'ANAS_OK_ANAS' if you receive this message.";
-
-  try {
-    console.log(`Testing connection to: ${apiUrl_ANSWER || 'no configured endpoint'}`);
-    const startTime = Date.now();
-
-  const payloadForProvider = SPACH_SERVICE.buildOpenCodePayload([{ text: testPrompt }], {
-      generationConfig: {
-        temperature: 0,
-        responseMimeType: 'text/plain'
-      },
-      temperature: 0
-    });
-
-    const { result, target } = await SPACH_SERVICE.callOpenCode({
-      payload: payloadForProvider,
-      requestTargets,
-      requestLabel: `ConnectionTest/${AI_PROVIDER}`
-    });
-
-    const endTime = Date.now();
-    const responseTime = endTime - startTime;
-
-    console.log(`Response received in ${responseTime}ms`);
-    console.log(`Using model: ${target.model}`);
-    console.log("API Response:", JSON.stringify(result, null, 2));
-
-    const aiText = SPACH_SERVICE.extractTextFromOpenCodeResult(result);
-    if (aiText) {
-      const cleanText = aiText.trim();
-      console.log(`✅ TEST PASSED - Model responded: "${aiText}"`);
-      console.log(`Response time: ${responseTime}ms`);
-      alert(`✅ Model Test SUCCESSFUL\nProvider: ${AI_PROVIDER}\nResponse: "${cleanText}"\nResponse time: ${responseTime}ms`);
-      return true;
-    } else {
-      console.error("❌ TEST FAILED - No valid content in response");
-      alert(`❌ Model Test FAILED\nNo valid content in response\nResponse time: ${responseTime}ms`);
-      return false;
-    }
-  } catch (error) {
-    console.error("❌ TEST FAILED - Error:", error);
-    alert(`❌ Model Test FAILED\nError: ${error.message}\nCheck console for details.`);
-    return false;
-  }
-}
 
 if (IS_MOODLE_PAGE) {
   document.addEventListener('keydown', (event) => {
@@ -859,7 +812,8 @@ if (IS_MOODLE_PAGE) {
     });
   });
 
-  console.log("[SpachBob] Moodle helper loaded. Press Alt+g to solve the current Moodle question using AI.");
+  // do not uncomment it
+  // console.log("[SpachBob] Moodle helper loaded. Press Alt+g to solve the current Moodle question using AI.");
 }
 
 // Log welcome message on load

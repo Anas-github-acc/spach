@@ -1,12 +1,15 @@
 ;(function initSpachBobService(global) {
+	const SPACH_ANSWER_SYSTEM_PROMPT = [
+		"Just tell me the correct answer."
+	].join(" ");
 	const CURR_API_KEY_STORAGE_KEY = "currApiKey";
-	const CURR_MODEL_STORAGE_KEY = "currModel";
+	const CURR_MODEL_STORAGE_KEY = "currModel_v2";
 	const KEY_STATE_STORAGE_KEY = "keyState";
 	const RPM_COOLDOWN_MS = 2 * 60 * 1000;
 	const IST_OFFSET_MINUTES = 330;
 	const inMemorySelectionState = {
 		currApiKey: 0,
-		currModel: 0,
+		currModel: 1,
 		keyState: {},
 		updatedAt: 0
 	};
@@ -112,7 +115,9 @@
 	function cloneSelectionState(state) {
 		return {
 			currApiKey: Number(state?.currApiKey) || 0,
-			currModel: Number(state?.currModel) || 0,
+			currModel: Number.isInteger(Number(state?.currModel)) && Number(state?.currModel) >= 0
+				? Number(state.currModel)
+				: 1,
 			keyState: { ...(state?.keyState || {}) },
 			updatedAt: Number(state?.updatedAt) || Date.now()
 		};
@@ -172,9 +177,9 @@
 		return 0;
 	}
 
-	function getCurrentModelIndexFromStorageValue(raw, modelCount = 3) {
+	function getCurrentModelIndexFromStorageValue(raw, modelCount = 5) {
 		const index = Number(raw);
-		if (!Number.isInteger(index) || index < 0) return 0;
+		if (!Number.isInteger(index) || index < 0) return modelCount > 1 ? 1 : 0;
 		return modelCount > 0 ? index % modelCount : index;
 	}
 
@@ -199,7 +204,9 @@
 	async function saveStoredSelectionState(state) {
 		const safeState = cloneSelectionState({
 			currApiKey: Number(state?.currApiKey) || 0,
-			currModel: Number(state?.currModel) || 0,
+			currModel: Number.isInteger(Number(state?.currModel)) && Number(state?.currModel) >= 0
+				? Number(state.currModel)
+				: 1,
 			keyState: normalizeKeyState({ keyState: state?.keyState || {} }).keyState,
 			updatedAt: Date.now()
 		});
@@ -450,7 +457,7 @@
 		return noTrailing;
 	}
 
-	function buildOpenCodeRequestTargets(models, keys, baseUrl) {
+	function buildOpenCodeRequestTargets(models, keys, baseUrl, variants = []) {
 		const out = [];
 		const serverBaseUrl = buildOpenCodeServerBaseUrl(baseUrl);
 		const url = `${serverBaseUrl}/session`;
@@ -460,6 +467,7 @@
 			safeKeys.forEach((key, keyIndex) => {
 				out.push({
 					model,
+					variant: isNonEmptyString(variants[modelIndex]) ? variants[modelIndex].trim() : "",
 					key: isNonEmptyString(key) ? key : "",
 					modelIndex,
 					keyIndex,
@@ -530,41 +538,50 @@
 	function buildOpenCodePayload(promptParts, options = {}) {
 		return {
 			messages: [{ role: "user", content: mapPromptPartsToOpenCodeContent(promptParts) }],
-			temperature: Number.isFinite(options.temperature) ? options.temperature : 0
+			temperature: Number.isFinite(options.temperature) ? options.temperature : 0,
+			useModelInstruction: options.useModelInstruction !== false
 		};
 	}
 
+	function getAnswerSystemPrompt() {
+		return SPACH_ANSWER_SYSTEM_PROMPT;
+	}
+
+	function getModelInstruction(target) {
+		return SPACH_ANSWER_SYSTEM_PROMPT;
+	}
+
+	function extractOpenCodeResponseParts(result) {
+		const parts = Array.isArray(result?.parts)
+			? result.parts
+			: (Array.isArray(result?.data?.parts) ? result.data.parts : []);
+		const reasoning = parts
+			.filter((part) => part?.type === "reasoning" && isNonEmptyString(part.text))
+			.map((part) => part.text.trim())
+			.join("\n")
+			.trim();
+		const text = parts
+			.filter((part) => part?.type === "text" && isNonEmptyString(part.text))
+			.map((part) => part.text.trim())
+			.join("\n")
+			.trim();
+
+		if (reasoning || text) return { reasoning, text };
+
+		const content = result?.choices?.[0]?.message?.content;
+		if (typeof content === "string") return { reasoning: "", text: content.trim() };
+		if (Array.isArray(content)) {
+			return {
+				reasoning: content.filter((part) => part?.type === "reasoning").map((part) => part.text || "").join("\n").trim(),
+				text: content.filter((part) => part?.type === "text").map((part) => part.text || "").join("\n").trim()
+			};
+		}
+
+		return { reasoning: "", text: "" };
+	}
+
 	function extractTextFromOpenCodeResult(result) {
-		const sessionParts = Array.isArray(result?.parts) ? result.parts : [];
-			if (sessionParts.length > 0) {
-				const text = sessionParts
-					.filter((part) => part && (part.type === "text" || part.type === "reasoning") && isNonEmptyString(part.text))
-					.map((part) => part.text)
-					.join("\n")
-					.trim();
-				if (text) return text;
-			}
-
-			const nestedParts = Array.isArray(result?.data?.parts) ? result.data.parts : [];
-			if (nestedParts.length > 0) {
-				const text = nestedParts
-					.filter((part) => part && (part.type === "text" || part.type === "reasoning") && isNonEmptyString(part.text))
-					.map((part) => part.text)
-					.join("\n")
-					.trim();
-				if (text) return text;
-			}
-
-			const content = result?.choices?.[0]?.message?.content;
-			if (typeof content === "string") return content;
-			if (Array.isArray(content)) {
-				return content
-					.map((part) => (typeof part?.text === "string" ? part.text : ""))
-					.filter(Boolean)
-					.join("\n")
-					.trim();
-			}
-		return "";
+		return extractOpenCodeResponseParts(result).text;
 	}
 
 	function splitOpenCodeModelId(model) {
@@ -853,9 +870,16 @@
 
 				const model = splitOpenCodeModelId(target.model);
 				const promptText = buildOpenCodePromptTextFromPayload(payload);
+				const modelInstruction = payload?.useModelInstruction === false
+					? ""
+					: getModelInstruction(target);
 				const sessionPromptBody = {
 					model,
-					parts: [{ type: "text", text: promptText || "Respond with plain text." }]
+					...(isNonEmptyString(target.variant) ? { variant: target.variant } : {}),
+					parts: [{
+						type: "text",
+						text: [modelInstruction, promptText || "Respond with plain text."].filter(Boolean).join("\n\n")
+					}]
 				};
 				console.log(`[${requestLabel}] Sending OpenCode message session=${sessionId} provider=${model.providerID} model=${model.modelID}`);
 
@@ -949,6 +973,9 @@
 		buildOpenCodeChatCompletionsUrl,
 		buildOpenCodeRequestTargets,
 		buildOpenCodePayload,
+		getAnswerSystemPrompt,
+		getModelInstruction,
+		extractOpenCodeResponseParts,
 		extractTextFromOpenCodeResult,
 		extractQuotaId,
 		getRateLimitExpiryEndIns,
